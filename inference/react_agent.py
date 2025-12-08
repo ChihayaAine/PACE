@@ -111,12 +111,30 @@ class MultiTurnReactAgent(FnCallAgent):
         return f"vllm server error!!!"
 
     def count_tokens(self, messages):
-        tokenizer = AutoTokenizer.from_pretrained(self.llm_local_path) 
-        full_prompt = tokenizer.apply_chat_template(messages, tokenize=False)
-        tokens = tokenizer(full_prompt, return_tensors="pt")
-        token_count = len(tokens["input_ids"][0])
-        
-        return token_count
+        """
+        Estimate tokens. For OpenRouter/API models, fall back to tiktoken to
+        avoid loading a local tokenizer. For local HF models, use the tokenizer.
+        """
+        # Try tiktoken first (works well for API usage)
+        try:
+            import tiktoken
+
+            encoding = tiktoken.get_encoding("cl100k_base")
+            text = "\n".join([str(m.get("content", "")) for m in messages])
+            return len(encoding.encode(text))
+        except Exception:
+            pass
+
+        # Fallback: try HF tokenizer if a local model path is provided
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(self.llm_local_path)
+            full_prompt = tokenizer.apply_chat_template(messages, tokenize=False)
+            tokens = tokenizer(full_prompt, return_tensors="pt")
+            return len(tokens["input_ids"][0])
+        except Exception:
+            # Last resort: rough estimate (1 token ≈ 4 chars)
+            text = "\n".join([str(m.get("content", "")) for m in messages])
+            return max(1, len(text) // 4)
 
     def _run(self, data: str, model: str, **kwargs) -> List[List[Message]]:
         self.model=model
