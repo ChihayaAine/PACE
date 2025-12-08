@@ -1,35 +1,37 @@
 import json
 import os
-import signal
-import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Union
+from typing import List, Union, Optional
 import requests
 from qwen_agent.tools.base import BaseTool, register_tool
 from prompt import EXTRACTOR_PROMPT 
 from openai import OpenAI
-import random
-from urllib.parse import urlparse, unquote
-import time 
-from transformers import AutoTokenizer
 import tiktoken
+
+
+# ============ You.com Scrape API 配置 ============
+RLAB_YOU_COM_SEARCH = "ICBU_P0715_300480BB4"
+RLAB_API_URL = "https://rlab.alibaba-inc.com/service/v1/open/"
+RLAB_API_HEADERS = {
+    'Content-Type': 'application/json',
+    'rlab-api-key': 'ICBU_H1425_95682FCB-8E8D-4F2F-BFDD-86CD0FE87DD4C71',
+    'rlab-request-source': 'deep-research',
+}
 
 VISIT_SERVER_TIMEOUT = int(os.getenv("VISIT_SERVER_TIMEOUT", 200))
 WEBCONTENT_MAXLENGTH = int(os.getenv("WEBCONTENT_MAXLENGTH", 150000))
 
-JINA_API_KEYS = os.getenv("JINA_API_KEYS", "")
 
-
-@staticmethod
 def truncate_to_tokens(text: str, max_tokens: int = 95000) -> str:
+    """将文本截断到指定的 token 数量"""
     encoding = tiktoken.get_encoding("cl100k_base")
-    
     tokens = encoding.encode(text)
     if len(tokens) <= max_tokens:
         return text
-    
     truncated_tokens = tokens[:max_tokens]
     return encoding.decode(truncated_tokens)
+
 
 OSS_JSON_FORMAT = """# Response Formats
 ## visit_content
@@ -38,10 +40,8 @@ OSS_JSON_FORMAT = """# Response Formats
 
 @register_tool('visit', allow_overwrite=True)
 class Visit(BaseTool):
-    # The `description` tells the agent the functionality of this tool.
     name = 'visit'
     description = 'Visit webpage(s) and return the summary of the content.'
-    # The `parameters` tell the agent what input parameters the tool has.
     parameters = {
         "type": "object",
         "properties": {
@@ -49,18 +49,18 @@ class Visit(BaseTool):
                 "type": ["string", "array"],
                 "items": {
                     "type": "string"
-                    },
+                },
                 "minItems": 1,
                 "description": "The URL(s) of the webpage(s) to visit. Can be a single URL or an array of URLs."
-        },
-        "goal": {
+            },
+            "goal": {
                 "type": "string",
                 "description": "The goal of the visit for webpage(s)."
-        }
+            }
         },
         "required": ["url", "goal"]
     }
-    # The `call` method is the main function of the tool.
+
     def call(self, params: Union[str, dict], **kwargs) -> str:
         try:
             url = params["url"]
@@ -75,7 +75,7 @@ class Visit(BaseTool):
         os.makedirs(log_folder, exist_ok=True)
 
         if isinstance(url, str):
-            response = self.readpage_jina(url, goal)
+            response = self.readpage_youcom(url, goal)
         else:
             response = []
             assert isinstance(url, List)
@@ -87,7 +87,7 @@ class Visit(BaseTool):
                     cur_response += "Summary: \n" + "The webpage content could not be processed, and therefore, no information is available." + "\n\n"
                 else:
                     try:
-                        cur_response = self.readpage_jina(u, goal)
+                        cur_response = self.readpage_youcom(u, goal)
                     except Exception as e:
                         cur_response = f"Error fetching {u}: {str(e)}"
                 response.append(cur_response)
@@ -95,8 +95,9 @@ class Visit(BaseTool):
         
         print(f'Summary Length {len(response)}; Summary Content {response}')
         return response.strip()
-        
+
     def call_server(self, msgs, max_retries=2):
+        """调用 LLM 服务进行内容摘要"""
         api_key = os.environ.get("API_KEY")
         url_llm = os.environ.get("API_BASE")
         model_name = os.environ.get("SUMMARY_MODEL_NAME", "")
@@ -123,79 +124,159 @@ class Visit(BaseTool):
                             content = content[left:right+1]
                     return content
             except Exception as e:
-                # print(e)
                 if attempt == (max_retries - 1):
                     return ""
                 continue
 
-
-    def jina_readpage(self, url: str) -> str:
+    def youcom_readpage(self, url: str) -> str:
         """
-        Read webpage content using Jina service.
+        使用 You.com API 读取网页内容
         
         Args:
-            url: The URL to read
-            goal: The goal/purpose of reading the page
+            url: 需要读取的网页 URL
             
         Returns:
-            str: The webpage content or error message
+            str: 网页内容（Markdown 格式）或错误信息
         """
         max_retries = 3
-        timeout = 50
+        timeout = 30
         
         for attempt in range(max_retries):
-            headers = {
-                "Authorization": f"Bearer {JINA_API_KEYS}",
-            }
             try:
-                response = requests.get(
-                    f"https://r.jina.ai/{url}",
-                    headers=headers,
+                # 构建请求数据
+                data = {
+                    'payload': {
+                        'payload': {
+                            "urls": [url],
+                            "format": "markdown"
+                        },
+                        "method": "visit"
+                    }
+                }
+                
+                response = requests.post(
+                    url=RLAB_API_URL + RLAB_YOU_COM_SEARCH,
+                    headers=RLAB_API_HEADERS,
+                    data=json.dumps(data),
                     timeout=timeout
                 )
+                
                 if response.status_code == 200:
-                    webpage_content = response.text
-                    return webpage_content
+                    res = response.json()
+                    results = res.get("payload", {}).get("result", [])
+                    
+                    if results and len(results) > 0:
+                        content = results[0].get("markdown", "")
+                        if content and len(content) > 10:
+                            return content
+                        else:
+                            print(f"[Visit] Empty content from You.com for {url}")
+                            if attempt < max_retries - 1:
+                                time.sleep(0.5)
+                                continue
+                            return "[visit] Empty content."
+                    else:
+                        print(f"[Visit] No results from You.com for {url}")
+                        if attempt < max_retries - 1:
+                            time.sleep(0.5)
+                            continue
+                        return "[visit] Failed to read page."
                 else:
-                    print(response.text)
-                    raise ValueError("jina readpage error")
+                    print(f"[Visit] You.com API error: {response.status_code} - {response.text}")
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5)
+                        continue
+                    return "[visit] Failed to read page."
+                    
             except Exception as e:
+                print(f"[Visit] Attempt {attempt + 1}/{max_retries} failed: {e}")
                 time.sleep(0.5)
                 if attempt == max_retries - 1:
                     return "[visit] Failed to read page."
                 
         return "[visit] Failed to read page."
 
-    def html_readpage_jina(self, url: str) -> str:
+    def youcom_batch_readpage(self, urls: List[str]) -> dict:
+        """
+        批量读取网页内容
+        
+        Args:
+            urls: URL 列表
+            
+        Returns:
+            dict: URL 到内容的映射
+        """
+        max_batch_size = 3  # You.com API 每批最多处理 3 个 URL
+        timeout = 30
+        html_maps = {}
+        
+        # 分批处理
+        batches = [urls[i:i + max_batch_size] for i in range(0, len(urls), max_batch_size)]
+        
+        for batch in batches:
+            try:
+                data = {
+                    'payload': {
+                        'payload': {
+                            "urls": batch,
+                            "format": "markdown"
+                        },
+                        "method": "visit"
+                    }
+                }
+                
+                response = requests.post(
+                    url=RLAB_API_URL + RLAB_YOU_COM_SEARCH,
+                    headers=RLAB_API_HEADERS,
+                    data=json.dumps(data),
+                    timeout=timeout
+                )
+                
+                if response.status_code == 200:
+                    res = response.json()
+                    results = res.get("payload", {}).get("result", [])
+                    
+                    for result in results:
+                        url = result.get("url", "")
+                        content = result.get("markdown", "")
+                        if url and content and len(content) > 10:
+                            html_maps[url] = content
+                            
+            except Exception as e:
+                print(f"[Visit] Batch request failed: {e}")
+                continue
+                
+        return html_maps
+
+    def html_readpage_youcom(self, url: str) -> str:
+        """尝试读取网页内容，最多重试 8 次"""
         max_attempts = 8
         for attempt in range(max_attempts):
-            content = self.jina_readpage(url)
-            service = "jina"     
-            print(service)
+            content = self.youcom_readpage(url)
+            print(f"[Visit] Attempt {attempt + 1}/{max_attempts} using You.com")
             if content and not content.startswith("[visit] Failed to read page.") and content != "[visit] Empty content." and not content.startswith("[document_parser]"):
                 return content
         return "[visit] Failed to read page."
 
-    def readpage_jina(self, url: str, goal: str) -> str:
+    def readpage_youcom(self, url: str, goal: str) -> str:
         """
-        Attempt to read webpage content by alternating between jina and aidata services.
+        读取网页内容并生成摘要
         
         Args:
-            url: The URL to read
-            goal: The goal/purpose of reading the page
+            url: 需要读取的网页 URL
+            goal: 读取目的/目标
             
         Returns:
-            str: The webpage content or error message
+            str: 格式化的摘要结果
         """
-   
         summary_page_func = self.call_server
         max_retries = int(os.getenv('VISIT_SERVER_MAX_RETRIES', 1))
 
-        content = self.html_readpage_jina(url)
+        content = self.html_readpage_youcom(url)
 
         if content and not content.startswith("[visit] Failed to read page.") and content != "[visit] Empty content." and not content.startswith("[document_parser]"):
             content = truncate_to_tokens(content, max_tokens=95000)
-            messages = [{"role":"user","content": EXTRACTOR_PROMPT.format(webpage_content=content, goal=goal)}]
+            messages = [{"role": "user", "content": EXTRACTOR_PROMPT.format(webpage_content=content, goal=goal)}]
             parse_retry_times = 0
             raw = summary_page_func(messages, max_retries=max_retries)
             summary_retries = 3
@@ -246,11 +327,8 @@ class Visit(BaseTool):
             
             return useful_information
 
-        # If no valid content was obtained after all retries
         else:
             useful_information = "The useful information in {url} for user goal {goal} as follows: \n\n".format(url=url, goal=goal)
             useful_information += "Evidence in page: \n" + "The provided webpage content could not be accessed. Please check the URL or file format." + "\n\n"
             useful_information += "Summary: \n" + "The webpage content could not be processed, and therefore, no information is available." + "\n\n"
             return useful_information
-
-    
