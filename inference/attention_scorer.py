@@ -4,7 +4,11 @@ Attention Scorer for Dynamic Context Focusing
 This module implements the attention scoring mechanism that predicts
 the relevance of each historical chunk for generating the next action.
 
-Uses OpenRouter API to call OpenAI's text-embedding-3-small model:
+Supports two embedding backends:
+1. Local BGE-M3 model (default, recommended)
+2. OpenRouter API (commented out, can be enabled if needed)
+
+Workflow:
 1. Encode current state as query vector Q_t
 2. Use pre-computed key vectors K_i for each historical chunk (Compute-on-Write)
 3. Compute relevance scores via cosine similarity
@@ -14,106 +18,159 @@ Uses OpenRouter API to call OpenAI's text-embedding-3-small model:
 import os
 import numpy as np
 from typing import Dict, List, Optional, Tuple
-from openai import OpenAI
 from memory_store import MemoryChunk, ExternalMemoryStore
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# BGE-M3 model path (local deployment)
+BGE_M3_MODEL_PATH = os.getenv("BGE_M3_MODEL_PATH", "/root/.cache/modelscope/hub/models/BAAI/bge-m3")
+
+# Whether to use FP16 (faster on GPU, set False for CPU)
+BGE_M3_USE_FP16 = os.getenv("BGE_M3_USE_FP16", "true").lower() == "true"
 
 
 class AttentionScorer:
     """
-    Attention scorer using OpenRouter API for embeddings.
+    Attention scorer using local BGE-M3 model for embeddings.
     
     Computes relevance scores for historical chunks based on
     semantic similarity to the current state (recent chunks + user question).
     """
     
+    # ========================================================================
+    # OpenRouter API configuration (commented out, kept for reference)
+    # ========================================================================
+    # OPENROUTER_API_KEY = "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"
+    # OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+    
     def __init__(self, 
-                 api_key: str = None,
-                 api_base: str = None,
-                 embedding_model: str = "openai/text-embedding-3-small"):
+                 model_path: str = None,
+                 use_fp16: bool = None):
         """
-        Initialize the attention scorer with OpenRouter API.
+        Initialize the attention scorer with local BGE-M3 model.
         
         Args:
-            api_key: OpenRouter API key (defaults to env API_KEY)
-            api_base: OpenRouter API base URL (defaults to env API_BASE)
-            embedding_model: Embedding model to use
+            model_path: Path to the BGE-M3 model (defaults to BGE_M3_MODEL_PATH)
+            use_fp16: Whether to use FP16 precision (defaults to BGE_M3_USE_FP16)
         """
-        self.api_key = api_key or os.environ.get("API_KEY", "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")
-        self.api_base = api_base or os.environ.get("API_BASE", "https://openrouter.ai/api/v1")
-        self.embedding_model = embedding_model
-        self.embedding_dim = 1536  # text-embedding-3-small outputs 1536 dimensions
+        self.model_path = model_path or BGE_M3_MODEL_PATH
+        self.use_fp16 = use_fp16 if use_fp16 is not None else BGE_M3_USE_FP16
+        self.model = None
+        self.embedding_dim = 1024  # BGE-M3 outputs 1024 dimensions
         
-        # Initialize OpenAI client for OpenRouter
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.api_base,
-            timeout=60.0
-        )
-        
-        print(f"[AttentionScorer] Initialized with model: {self.embedding_model}")
+        # Lazy load the model
+        self._load_model()
     
-    def encode_text(self, text: str, max_retries: int = 3) -> Optional[np.ndarray]:
+    def _load_model(self):
+        """Load the BGE-M3 model."""
+        try:
+            from FlagEmbedding import BGEM3FlagModel
+            print(f"[AttentionScorer] Loading BGE-M3 model from: {self.model_path}")
+            print(f"[AttentionScorer] use_fp16={self.use_fp16}")
+            
+            self.model = BGEM3FlagModel(self.model_path, use_fp16=self.use_fp16)
+            self.embedding_dim = 1024  # BGE-M3 dense vector dimension
+            
+            print(f"[AttentionScorer] BGE-M3 model loaded successfully")
+        except ImportError as e:
+            print(f"[AttentionScorer] Warning: FlagEmbedding not installed: {e}")
+            print(f"[AttentionScorer] Install with: pip install FlagEmbedding")
+            self.model = None
+        except Exception as e:
+            print(f"[AttentionScorer] Error loading BGE-M3 model: {e}")
+            self.model = None
+    
+    def encode_text(self, text: str) -> Optional[np.ndarray]:
         """
-        Encode text into embedding vector using OpenRouter API.
+        Encode text into embedding vector using BGE-M3.
         
         Args:
             text: Text to encode
-            max_retries: Number of retry attempts
         
         Returns:
             Embedding vector (numpy array) or None on failure
         """
-        # Truncate text if too long (embedding models have token limits)
-        if len(text) > 8000:
-            text = text[:8000]
+        if self.model is None:
+            print("[AttentionScorer] Model not loaded, cannot encode")
+            return None
         
-        for attempt in range(max_retries):
-            try:
-                response = self.client.embeddings.create(
-                    model=self.embedding_model,
-                    input=text
-                )
-                embedding = response.data[0].embedding
-                return np.array(embedding, dtype=np.float32)
-            except Exception as e:
-                print(f"[AttentionScorer] Embedding attempt {attempt + 1}/{max_retries} failed: {e}")
-                if attempt == max_retries - 1:
-                    return None
-        return None
+        # Truncate text if too long (BGE-M3 max_length is 8192)
+        if len(text) > 20000:  # Rough char limit
+            text = text[:20000]
+        
+        try:
+            # BGE-M3 returns dict with 'dense_vecs' key
+            result = self.model.encode([text], batch_size=1, max_length=8192)
+            embedding = result['dense_vecs'][0]
+            return np.array(embedding, dtype=np.float32)
+        except Exception as e:
+            print(f"[AttentionScorer] Encoding failed: {type(e).__name__}: {e}")
+            return None
     
-    def encode_batch(self, texts: List[str], max_retries: int = 3) -> List[Optional[np.ndarray]]:
+    def encode_batch(self, texts: List[str]) -> List[Optional[np.ndarray]]:
         """
         Encode multiple texts into embedding vectors.
         
-        Note: OpenAI embedding API supports batch input for efficiency.
-        
         Args:
             texts: List of texts to encode
-            max_retries: Number of retry attempts
         
         Returns:
             List of embedding vectors
         """
+        if self.model is None:
+            print("[AttentionScorer] Model not loaded, cannot encode")
+            return [None] * len(texts)
+        
         if not texts:
             return []
         
         # Truncate texts
-        truncated = [t[:8000] if len(t) > 8000 else t for t in texts]
+        truncated = [t[:20000] if len(t) > 20000 else t for t in texts]
         
-        for attempt in range(max_retries):
-            try:
-                response = self.client.embeddings.create(
-                    model=self.embedding_model,
-                    input=truncated
-                )
-                embeddings = [np.array(item.embedding, dtype=np.float32) for item in response.data]
-                return embeddings
-            except Exception as e:
-                print(f"[AttentionScorer] Batch embedding attempt {attempt + 1}/{max_retries} failed: {e}")
-                if attempt == max_retries - 1:
-                    # Fallback: try one by one
-                    return [self.encode_text(t) for t in texts]
-        return [None] * len(texts)
+        try:
+            result = self.model.encode(truncated, batch_size=12, max_length=8192)
+            embeddings = [np.array(vec, dtype=np.float32) for vec in result['dense_vecs']]
+            print(f"[AttentionScorer] Batch encoded {len(texts)} texts")
+            return embeddings
+        except Exception as e:
+            print(f"[AttentionScorer] Batch encoding failed: {type(e).__name__}: {e}")
+            # Fallback: try one by one
+            return [self.encode_text(t) for t in texts]
+    
+    # ========================================================================
+    # OpenRouter API methods (commented out, kept for reference)
+    # ========================================================================
+    # def encode_text_api(self, text: str, max_retries: int = 3) -> Optional[np.ndarray]:
+    #     """
+    #     Encode text into embedding vector using OpenRouter API.
+    #     """
+    #     from openai import OpenAI
+    #     
+    #     client = OpenAI(
+    #         api_key=self.OPENROUTER_API_KEY,
+    #         base_url=self.OPENROUTER_API_BASE,
+    #         timeout=60.0
+    #     )
+    #     
+    #     if len(text) > 8000:
+    #         text = text[:8000]
+    #     
+    #     for attempt in range(max_retries):
+    #         try:
+    #             response = client.embeddings.create(
+    #                 model="openai/text-embedding-3-small",
+    #                 input=text
+    #             )
+    #             embedding = response.data[0].embedding
+    #             return np.array(embedding, dtype=np.float32)
+    #         except Exception as e:
+    #             print(f"[AttentionScorer] API attempt {attempt + 1}/{max_retries} failed: {e}")
+    #             if attempt == max_retries - 1:
+    #                 return None
+    #     return None
     
     def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
         """Compute cosine similarity between two vectors."""
@@ -279,8 +336,8 @@ class AttentionScorer:
         combined = "\n\n".join(parts)
         
         # Ensure total length is reasonable for embedding
-        if len(combined) > 6000:
-            combined = combined[:6000]
+        if len(combined) > 15000:
+            combined = combined[:15000]
         
         return combined
     
