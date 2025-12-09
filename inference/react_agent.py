@@ -101,6 +101,7 @@ class MultiTurnReactAgent(FnCallAgent):
         self.rep_generator = None
         self.attention_scorer = None
         self.context_builder = None
+        self.current_log_filepath = None  # Current task's log file path
         
         if ENABLE_DYNAMIC_CONTEXT:
             self._init_dynamic_context()
@@ -138,31 +139,60 @@ class MultiTurnReactAgent(FnCallAgent):
         
         print(f"[Agent] Dynamic Context Focusing initialized (max_tokens={MAX_CONTEXT_TOKENS}, thresholds={ATTENTION_THRESHOLD_A}/{ATTENTION_THRESHOLD_B}/{ATTENTION_THRESHOLD_C})")
     
-    def _save_memory_to_file(self, question: str = ""):
+    def _init_memory_log_file(self, question: str = ""):
         """
-        Save all memory chunks to a JSON file for debugging and analysis.
+        Initialize a new memory log file at the start of each task.
+        Creates the file immediately with header information.
         
-        File is saved to memory_logs/ with timestamp as filename.
-        Contains all chunks with their multi-level representations and metadata.
+        Args:
+            question: The user's question for this task
+        
+        Returns:
+            The filepath of the created log file
         """
-        if not ENABLE_DYNAMIC_CONTEXT or self.memory_store is None:
+        if not ENABLE_DYNAMIC_CONTEXT:
             return None
         
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"memory_{timestamp}.json"
-        filepath = os.path.join(MEMORY_LOGS_DIR, filename)
+        self.current_log_filepath = os.path.join(MEMORY_LOGS_DIR, filename)
         
-        # Build log data
+        # Initialize log data structure
         log_data = {
             "timestamp": datetime.now().isoformat(),
             "question": question,
-            "total_chunks": self.memory_store.size(),
+            "status": "in_progress",
             "chunks": []
         }
         
-        # Add each chunk with all its information
-        for chunk in self.memory_store.get_all_chunks():
+        # Write initial file
+        try:
+            with open(self.current_log_filepath, 'w', encoding='utf-8') as f:
+                json.dump(log_data, f, ensure_ascii=False, indent=2)
+            print(f"[Memory] Created log file: {self.current_log_filepath}")
+            return self.current_log_filepath
+        except Exception as e:
+            print(f"[Memory] Error creating log file: {e}")
+            self.current_log_filepath = None
+            return None
+    
+    def _append_chunk_to_log(self, chunk):
+        """
+        Append a single chunk to the current log file in real-time.
+        
+        Args:
+            chunk: The MemoryChunk to append
+        """
+        if not ENABLE_DYNAMIC_CONTEXT or self.current_log_filepath is None:
+            return
+        
+        try:
+            # Read current file
+            with open(self.current_log_filepath, 'r', encoding='utf-8') as f:
+                log_data = json.load(f)
+            
+            # Add new chunk
             chunk_data = {
                 "id": chunk.id,
                 "type": chunk.type,
@@ -179,16 +209,40 @@ class MultiTurnReactAgent(FnCallAgent):
                 "metadata": chunk.metadata
             }
             log_data["chunks"].append(chunk_data)
-        
-        # Write to file
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
+            
+            # Write back to file
+            with open(self.current_log_filepath, 'w', encoding='utf-8') as f:
                 json.dump(log_data, f, ensure_ascii=False, indent=2)
-            print(f"[Memory] Saved {self.memory_store.size()} chunks to {filepath}")
-            return filepath
+            
+            print(f"[Memory] Appended chunk {chunk.id} to log file")
         except Exception as e:
-            print(f"[Memory] Error saving to file: {e}")
-            return None
+            print(f"[Memory] Error appending chunk to log: {e}")
+    
+    def _finalize_memory_log(self, termination: str = ""):
+        """
+        Mark the log file as complete when task finishes.
+        
+        Args:
+            termination: The termination reason
+        """
+        if not ENABLE_DYNAMIC_CONTEXT or self.current_log_filepath is None:
+            return
+        
+        try:
+            with open(self.current_log_filepath, 'r', encoding='utf-8') as f:
+                log_data = json.load(f)
+            
+            log_data["status"] = "completed"
+            log_data["termination"] = termination
+            log_data["total_chunks"] = len(log_data.get("chunks", []))
+            log_data["completed_at"] = datetime.now().isoformat()
+            
+            with open(self.current_log_filepath, 'w', encoding='utf-8') as f:
+                json.dump(log_data, f, ensure_ascii=False, indent=2)
+            
+            print(f"[Memory] Finalized log file: {self.current_log_filepath}")
+        except Exception as e:
+            print(f"[Memory] Error finalizing log: {e}")
 
     def sanity_check_output(self, content):
         return "<think>" in content and "</think>" in content
@@ -318,6 +372,9 @@ class MultiTurnReactAgent(FnCallAgent):
             except Exception as e:
                 print(f"[Memory] Warning: Failed to pre-compute embedding for chunk {chunk.id}: {e}")
         
+        # Real-time: Append chunk to log file immediately
+        self._append_chunk_to_log(chunk)
+        
         return chunk
 
     def _build_dynamic_context(self, system_prompt: str, user_question: str) -> List[Dict]:
@@ -400,6 +457,9 @@ class MultiTurnReactAgent(FnCallAgent):
             self.memory_store = ExternalMemoryStore()
             # set_glimpse_memory_store(self.memory_store)  # glimpse disabled
             
+            # Create log file at task start (real-time logging)
+            self._init_memory_log_file(question)
+            
             # Add initial user question to memory
             self._add_to_memory(
                 content=f"User Question: {question}",
@@ -419,8 +479,8 @@ class MultiTurnReactAgent(FnCallAgent):
                 prediction = 'No answer found after 2h30mins'
                 termination = 'No answer found after 2h30mins'
                 
-                # Save memory to file before returning
-                self._save_memory_to_file(question)
+                # Finalize memory log before returning
+                self._finalize_memory_log(termination)
                 
                 result = {
                     "question": question,
@@ -528,8 +588,8 @@ class MultiTurnReactAgent(FnCallAgent):
                     prediction = full_messages[-1]['content']
                     termination = 'format error: generate an answer as token limit reached'
                 
-                # Save memory to file before returning
-                self._save_memory_to_file(question)
+                # Finalize memory log before returning
+                self._finalize_memory_log(termination)
                 
                 result = {
                     "question": question,
@@ -549,8 +609,8 @@ class MultiTurnReactAgent(FnCallAgent):
             if num_llm_calls_available == 0:
                 termination = 'exceed available llm calls'
         
-        # Save memory to file before returning
-        self._save_memory_to_file(question)
+        # Finalize memory log before returning
+        self._finalize_memory_log(termination)
         
         result = {
             "question": question,
