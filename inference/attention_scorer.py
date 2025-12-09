@@ -4,123 +4,154 @@ Attention Scorer for Dynamic Context Focusing
 This module implements the attention scoring mechanism that predicts
 the relevance of each historical chunk for generating the next action.
 
-Uses a vectorized approach (Method B):
+Uses OpenRouter API to call OpenAI's text-embedding-3-small model:
 1. Encode current state as query vector Q_t
-2. Use pre-computed key vectors K_i for each historical chunk
-3. Compute relevance scores via dot product similarity
+2. Use pre-computed key vectors K_i for each historical chunk (Compute-on-Write)
+3. Compute relevance scores via cosine similarity
 4. Apply softmax for normalization
 """
 
+import os
 import numpy as np
 from typing import Dict, List, Optional, Tuple
+from openai import OpenAI
 from memory_store import MemoryChunk, ExternalMemoryStore
 
 
 class AttentionScorer:
     """
-    Vectorized attention scorer using sentence embeddings.
+    Attention scorer using OpenRouter API for embeddings.
     
     Computes relevance scores for historical chunks based on
-    semantic similarity to the current state (recent chunks).
+    semantic similarity to the current state (recent chunks + user question).
     """
     
     def __init__(self, 
-                 embedding_model: str = "all-MiniLM-L6-v2",
-                 use_gpu: bool = False):
+                 api_key: str = None,
+                 api_base: str = None,
+                 embedding_model: str = "openai/text-embedding-3-small"):
         """
-        Initialize the attention scorer.
+        Initialize the attention scorer with OpenRouter API.
         
         Args:
-            embedding_model: Name of the sentence-transformers model to use
-            use_gpu: Whether to use GPU for encoding
+            api_key: OpenRouter API key (defaults to env API_KEY)
+            api_base: OpenRouter API base URL (defaults to env API_BASE)
+            embedding_model: Embedding model to use
         """
-        self.embedding_model_name = embedding_model
-        self.use_gpu = use_gpu
-        self.model = None
-        self.embedding_dim = 384  # Default for MiniLM
+        self.api_key = api_key or os.environ.get("API_KEY", "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")
+        self.api_base = api_base or os.environ.get("API_BASE", "https://openrouter.ai/api/v1")
+        self.embedding_model = embedding_model
+        self.embedding_dim = 1536  # text-embedding-3-small outputs 1536 dimensions
         
-        # Lazy load the model
-        self._load_model()
+        # Initialize OpenAI client for OpenRouter
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base,
+            timeout=60.0
+        )
+        
+        print(f"[AttentionScorer] Initialized with model: {self.embedding_model}")
     
-    def _load_model(self):
-        """Load the sentence transformer model."""
-        try:
-            from sentence_transformers import SentenceTransformer
-            device = "cuda" if self.use_gpu else "cpu"
-            self.model = SentenceTransformer(self.embedding_model_name, device=device)
-            self.embedding_dim = self.model.get_sentence_embedding_dimension()
-            print(f"[AttentionScorer] Loaded model: {self.embedding_model_name}, dim={self.embedding_dim}")
-        except ImportError:
-            print("[AttentionScorer] Warning: sentence-transformers not installed. Using fallback.")
-            self.model = None
-        except Exception as e:
-            print(f"[AttentionScorer] Error loading model: {e}. Using fallback.")
-            self.model = None
-    
-    def encode_text(self, text: str) -> np.ndarray:
+    def encode_text(self, text: str, max_retries: int = 3) -> Optional[np.ndarray]:
         """
-        Encode text into embedding vector.
+        Encode text into embedding vector using OpenRouter API.
         
         Args:
             text: Text to encode
+            max_retries: Number of retry attempts
         
         Returns:
-            Embedding vector
+            Embedding vector (numpy array) or None on failure
         """
-        if self.model is not None:
-            return self.model.encode(text, convert_to_numpy=True)
-        else:
-            # Fallback: simple TF-IDF-like encoding (very basic)
-            return self._fallback_encode(text)
+        # Truncate text if too long (embedding models have token limits)
+        if len(text) > 8000:
+            text = text[:8000]
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.embeddings.create(
+                    model=self.embedding_model,
+                    input=text
+                )
+                embedding = response.data[0].embedding
+                return np.array(embedding, dtype=np.float32)
+            except Exception as e:
+                print(f"[AttentionScorer] Embedding attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt == max_retries - 1:
+                    return None
+        return None
     
-    def encode_batch(self, texts: List[str]) -> np.ndarray:
+    def encode_batch(self, texts: List[str], max_retries: int = 3) -> List[Optional[np.ndarray]]:
         """
         Encode multiple texts into embedding vectors.
         
+        Note: OpenAI embedding API supports batch input for efficiency.
+        
         Args:
             texts: List of texts to encode
+            max_retries: Number of retry attempts
         
         Returns:
-            Matrix of embedding vectors (N x dim)
+            List of embedding vectors
         """
-        if self.model is not None:
-            return self.model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-        else:
-            return np.stack([self._fallback_encode(t) for t in texts])
+        if not texts:
+            return []
+        
+        # Truncate texts
+        truncated = [t[:8000] if len(t) > 8000 else t for t in texts]
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.embeddings.create(
+                    model=self.embedding_model,
+                    input=truncated
+                )
+                embeddings = [np.array(item.embedding, dtype=np.float32) for item in response.data]
+                return embeddings
+            except Exception as e:
+                print(f"[AttentionScorer] Batch embedding attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt == max_retries - 1:
+                    # Fallback: try one by one
+                    return [self.encode_text(t) for t in texts]
+        return [None] * len(texts)
     
-    def _fallback_encode(self, text: str) -> np.ndarray:
-        """
-        Fallback encoding using simple hash-based projection.
-        Not semantically meaningful but provides consistent dimensions.
-        """
-        # Simple hash-based encoding
-        np.random.seed(hash(text) % (2**32))
-        vec = np.random.randn(self.embedding_dim)
-        return vec / (np.linalg.norm(vec) + 1e-8)
+    def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """Compute cosine similarity between two vectors."""
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        return float(np.dot(vec1, vec2) / (norm1 * norm2))
     
-    def compute_embeddings_for_chunk(self, chunk: MemoryChunk) -> np.ndarray:
+    def compute_embeddings_for_chunk(self, chunk: MemoryChunk) -> Optional[np.ndarray]:
         """
-        Compute embedding for a chunk using its summary_detailed representation.
+        Compute and cache embedding for a chunk using its summary_brief representation.
+        This implements the Compute-on-Write strategy.
         
         Args:
             chunk: MemoryChunk to encode
         
         Returns:
-            Embedding vector
+            Embedding vector (also cached in chunk.embedding)
         """
-        # Use summary_detailed for encoding (balance between detail and efficiency)
-        text = chunk.representations.get("summary_detailed", "")
+        # Use summary_brief for embedding (efficient, captures key info)
+        text = chunk.representations.get("summary_brief", "")
+        if not text:
+            text = chunk.representations.get("summary_detailed", "")
         if not text:
             text = chunk.representations.get("full", "")
         
-        # Truncate if too long
-        if len(text) > 2000:
-            text = text[:2000]
+        if not text:
+            return None
         
-        return self.encode_text(text)
+        embedding = self.encode_text(text)
+        if embedding is not None:
+            chunk.embedding = embedding
+        return embedding
     
     def score_chunks(self,
                      memory_store: ExternalMemoryStore,
+                     user_question: str = "",
                      num_recent: int = 2,
                      temperature: float = 1.0) -> Dict[int, float]:
         """
@@ -128,129 +159,141 @@ class AttentionScorer:
         
         Args:
             memory_store: The external memory store containing all chunks
-            num_recent: Number of recent chunks to use as query (current state)
+            user_question: The original user question (included in query)
+            num_recent: Number of recent chunks to use as part of query (current state)
             temperature: Temperature for softmax (lower = sharper distribution)
         
         Returns:
-            Dictionary mapping chunk_id to attention weight (after softmax)
+            Dictionary mapping chunk_id to attention weight (after softmax normalization)
         """
         all_chunks = memory_store.get_all_chunks()
         
         if len(all_chunks) <= num_recent:
             # Not enough history, all chunks get equal weight
-            return {chunk.id: 1.0 / len(all_chunks) for chunk in all_chunks}
+            if all_chunks:
+                return {chunk.id: 1.0 / len(all_chunks) for chunk in all_chunks}
+            return {}
         
-        # Split into recent (query) and history (keys)
+        # Split into recent (part of query) and history (to be scored)
         recent_chunks = all_chunks[-num_recent:]
         history_chunks = all_chunks[:-num_recent]
         
-        # Build query vector from recent chunks
-        query_vector = self._build_query_vector(recent_chunks)
+        # Build query text from user question + recent chunks
+        query_text = self._build_query_text(user_question, recent_chunks)
         
-        # Compute key vectors for history chunks (use cached if available)
-        key_vectors, chunk_ids = self._get_key_vectors(history_chunks, memory_store)
+        # Encode query
+        query_embedding = self.encode_text(query_text)
+        if query_embedding is None:
+            print("[AttentionScorer] Failed to encode query, using uniform weights")
+            return {chunk.id: 1.0 / len(all_chunks) for chunk in all_chunks}
         
-        if len(key_vectors) == 0:
-            # No valid history
-            result = {chunk.id: 1.0 / len(all_chunks) for chunk in all_chunks}
-            return result
+        # Compute/retrieve embeddings for history chunks and calculate similarities
+        similarities = []
+        chunk_ids = []
         
-        # Compute similarity scores (dot product)
-        # query_vector: (dim,), key_vectors: (N, dim)
-        similarities = np.dot(key_vectors, query_vector)
+        # Batch process chunks that don't have embeddings yet
+        chunks_needing_embedding = [c for c in history_chunks if c.embedding is None]
+        if chunks_needing_embedding:
+            texts_to_embed = []
+            for chunk in chunks_needing_embedding:
+                text = chunk.representations.get("summary_brief", "") or \
+                       chunk.representations.get("summary_detailed", "") or \
+                       chunk.representations.get("full", "")
+                texts_to_embed.append(text if text else f"Step {chunk.id}: {chunk.type}")
+            
+            # Batch embed
+            embeddings = self.encode_batch(texts_to_embed)
+            for chunk, emb in zip(chunks_needing_embedding, embeddings):
+                if emb is not None:
+                    chunk.embedding = emb
         
-        # Apply softmax with temperature
-        scores = self._softmax(similarities, temperature=temperature)
+        # Calculate similarities
+        for chunk in history_chunks:
+            if chunk.embedding is not None:
+                sim = self.cosine_similarity(query_embedding, chunk.embedding)
+                similarities.append(max(0, sim))  # Ensure non-negative
+                chunk_ids.append(chunk.id)
+            else:
+                # Fallback for failed embeddings
+                similarities.append(0.1)
+                chunk_ids.append(chunk.id)
+        
+        # Apply softmax normalization
+        if similarities:
+            scores_array = np.array(similarities)
+            weights = self._softmax(scores_array, temperature=temperature)
+        else:
+            weights = np.array([])
         
         # Build result dictionary
         result = {}
         for i, chunk_id in enumerate(chunk_ids):
-            result[chunk_id] = float(scores[i])
+            result[chunk_id] = float(weights[i])
+            # Also update the chunk's relevance score
+            if chunk_id in [c.id for c in history_chunks]:
+                for c in history_chunks:
+                    if c.id == chunk_id:
+                        c.next_step_relevance = float(weights[i])
+                        break
         
-        # Recent chunks always get high weight (not in softmax)
+        # Recent chunks always get weight 1.0 (they're included in full anyway)
         for chunk in recent_chunks:
-            result[chunk.id] = 1.0  # Max weight for recent chunks
+            result[chunk.id] = 1.0
+            chunk.next_step_relevance = 1.0
+        
+        # Log statistics
+        if similarities:
+            print(f"[AttentionScorer] Scored {len(history_chunks)} history chunks, "
+                  f"sim range: [{min(similarities):.3f}, {max(similarities):.3f}], "
+                  f"weight range: [{min(weights):.4f}, {max(weights):.4f}]")
         
         return result
     
-    def _build_query_vector(self, recent_chunks: List[MemoryChunk]) -> np.ndarray:
+    def _build_query_text(self, user_question: str, recent_chunks: List[MemoryChunk]) -> str:
         """
-        Build query vector from recent chunks.
+        Build query text from user question and recent chunks.
         
         Args:
+            user_question: The original user question
             recent_chunks: List of recent MemoryChunks
         
         Returns:
-            Query embedding vector
+            Combined query text for embedding
         """
-        # Concatenate recent chunk contents
-        texts = []
+        parts = []
+        
+        # Include user question
+        if user_question:
+            parts.append(f"Task: {user_question}")
+        
+        # Include recent chunks (use summary_detailed for more context)
         for chunk in recent_chunks:
-            text = chunk.representations.get("full", "")
-            if len(text) > 1500:
-                text = text[:1500]
-            texts.append(text)
+            content = chunk.representations.get("summary_detailed", "") or \
+                      chunk.representations.get("full", "")
+            if content:
+                # Truncate each chunk's contribution
+                if len(content) > 1500:
+                    content = content[:1500]
+                parts.append(f"Recent [{chunk.type}]: {content}")
         
-        combined_text = "\n\n".join(texts)
+        combined = "\n\n".join(parts)
         
-        # Encode combined text
-        return self.encode_text(combined_text)
-    
-    def _get_key_vectors(self, 
-                         chunks: List[MemoryChunk],
-                         memory_store: ExternalMemoryStore) -> Tuple[np.ndarray, List[int]]:
-        """
-        Get key vectors for chunks, using cached embeddings when available.
+        # Ensure total length is reasonable for embedding
+        if len(combined) > 6000:
+            combined = combined[:6000]
         
-        Args:
-            chunks: List of chunks to get vectors for
-            memory_store: Memory store (for updating cached embeddings)
-        
-        Returns:
-            Tuple of (key_vectors matrix, chunk_ids list)
-        """
-        key_vectors = []
-        chunk_ids = []
-        texts_to_encode = []
-        chunks_to_update = []
-        
-        for chunk in chunks:
-            if chunk.embedding is not None:
-                # Use cached embedding
-                key_vectors.append(chunk.embedding)
-                chunk_ids.append(chunk.id)
-            else:
-                # Need to compute embedding
-                text = chunk.representations.get("summary_detailed", "")
-                if not text:
-                    text = chunk.representations.get("full", "")
-                if len(text) > 2000:
-                    text = text[:2000]
-                texts_to_encode.append(text)
-                chunks_to_update.append(chunk)
-        
-        # Batch encode texts that don't have embeddings
-        if texts_to_encode:
-            new_embeddings = self.encode_batch(texts_to_encode)
-            for i, chunk in enumerate(chunks_to_update):
-                chunk.embedding = new_embeddings[i]
-                key_vectors.append(new_embeddings[i])
-                chunk_ids.append(chunk.id)
-        
-        if key_vectors:
-            return np.stack(key_vectors), chunk_ids
-        return np.array([]), []
+        return combined
     
     def _softmax(self, x: np.ndarray, temperature: float = 1.0) -> np.ndarray:
         """
         Compute softmax with temperature.
         
         Args:
-            x: Input array
+            x: Input array of scores
             temperature: Temperature (lower = sharper distribution)
         
         Returns:
-            Softmax probabilities
+            Softmax probabilities (sum to 1)
         """
         x = x / temperature
         # Subtract max for numerical stability
@@ -260,6 +303,7 @@ class AttentionScorer:
     
     def get_top_k_chunks(self,
                          memory_store: ExternalMemoryStore,
+                         user_question: str = "",
                          k: int = 5,
                          num_recent: int = 2) -> List[Tuple[int, float]]:
         """
@@ -267,13 +311,14 @@ class AttentionScorer:
         
         Args:
             memory_store: The external memory store
+            user_question: The original user question
             k: Number of top chunks to return
             num_recent: Number of recent chunks used as query
         
         Returns:
-            List of (chunk_id, attention_weight) tuples, sorted by weight
+            List of (chunk_id, attention_weight) tuples, sorted by weight descending
         """
-        scores = self.score_chunks(memory_store, num_recent=num_recent)
+        scores = self.score_chunks(memory_store, user_question, num_recent=num_recent)
         
         # Exclude recent chunks from ranking
         recent_ids = set(c.id for c in memory_store.get_recent_chunks(num_recent))
@@ -295,4 +340,3 @@ def get_attention_scorer() -> AttentionScorer:
     if _default_scorer is None:
         _default_scorer = AttentionScorer()
     return _default_scorer
-

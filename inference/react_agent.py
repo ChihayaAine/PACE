@@ -54,6 +54,10 @@ ENABLE_DYNAMIC_CONTEXT = os.getenv('ENABLE_DYNAMIC_CONTEXT', 'true').lower() == 
 MAX_CONTEXT_TOKENS = int(os.getenv('MAX_CONTEXT_TOKENS', 100000))
 NUM_RECENT_FULL = int(os.getenv('NUM_RECENT_FULL', 2))
 
+# Memory logs directory
+MEMORY_LOGS_DIR = os.path.join(os.path.dirname(__file__), "memory_logs")
+os.makedirs(MEMORY_LOGS_DIR, exist_ok=True)
+
 # Attention thresholds (relative to uniform distribution)
 ATTENTION_THRESHOLD_A = float(os.getenv('ATTENTION_THRESHOLD_A', 0.3))  # Below: placeholder
 ATTENTION_THRESHOLD_B = float(os.getenv('ATTENTION_THRESHOLD_B', 0.7))  # a-b: summary_brief
@@ -133,6 +137,58 @@ class MultiTurnReactAgent(FnCallAgent):
         # set_glimpse_memory_store(self.memory_store)
         
         print(f"[Agent] Dynamic Context Focusing initialized (max_tokens={MAX_CONTEXT_TOKENS}, thresholds={ATTENTION_THRESHOLD_A}/{ATTENTION_THRESHOLD_B}/{ATTENTION_THRESHOLD_C})")
+    
+    def _save_memory_to_file(self, question: str = ""):
+        """
+        Save all memory chunks to a JSON file for debugging and analysis.
+        
+        File is saved to memory_logs/ with timestamp as filename.
+        Contains all chunks with their multi-level representations and metadata.
+        """
+        if not ENABLE_DYNAMIC_CONTEXT or self.memory_store is None:
+            return None
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"memory_{timestamp}.json"
+        filepath = os.path.join(MEMORY_LOGS_DIR, filename)
+        
+        # Build log data
+        log_data = {
+            "timestamp": datetime.now().isoformat(),
+            "question": question,
+            "total_chunks": self.memory_store.size(),
+            "chunks": []
+        }
+        
+        # Add each chunk with all its information
+        for chunk in self.memory_store.get_all_chunks():
+            chunk_data = {
+                "id": chunk.id,
+                "type": chunk.type,
+                "timestamp": chunk.timestamp,
+                "representations": {
+                    "full": chunk.representations.get("full", ""),
+                    "summary_detailed": chunk.representations.get("summary_detailed", ""),
+                    "summary_brief": chunk.representations.get("summary_brief", ""),
+                    "keywords": chunk.representations.get("keywords", [])
+                },
+                "next_step_relevance": chunk.next_step_relevance,
+                "attention_weight": chunk.attention_weight,
+                "has_embedding": chunk.embedding is not None,
+                "metadata": chunk.metadata
+            }
+            log_data["chunks"].append(chunk_data)
+        
+        # Write to file
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(log_data, f, ensure_ascii=False, indent=2)
+            print(f"[Memory] Saved {self.memory_store.size()} chunks to {filepath}")
+            return filepath
+        except Exception as e:
+            print(f"[Memory] Error saving to file: {e}")
+            return None
 
     def sanity_check_output(self, content):
         return "<think>" in content and "</think>" in content
@@ -252,6 +308,16 @@ class MultiTurnReactAgent(FnCallAgent):
         )
         
         print(f"[Memory] Added chunk {chunk.id} ({chunk_type}), keywords: {representations['keywords'][:5]}")
+        
+        # Compute-on-Write: Pre-compute key vector (embedding) for this chunk
+        if self.attention_scorer is not None:
+            try:
+                self.attention_scorer.compute_embeddings_for_chunk(chunk)
+                if chunk.embedding is not None:
+                    print(f"[Memory] Pre-computed embedding for chunk {chunk.id}")
+            except Exception as e:
+                print(f"[Memory] Warning: Failed to pre-compute embedding for chunk {chunk.id}: {e}")
+        
         return chunk
 
     def _build_dynamic_context(self, system_prompt: str, user_question: str) -> List[Dict]:
@@ -277,6 +343,7 @@ class MultiTurnReactAgent(FnCallAgent):
             try:
                 attention_weights = self.attention_scorer.score_chunks(
                     self.memory_store,
+                    user_question=user_question,
                     num_recent=NUM_RECENT_FULL,
                     temperature=1.0
                 )
@@ -292,7 +359,7 @@ class MultiTurnReactAgent(FnCallAgent):
         
         # Build context using attention weights
         try:
-            messages = self.context_builder.build_context_simple(
+            messages, chunk_levels = self.context_builder.build_context_simple(
                 memory_store=self.memory_store,
                 attention_weights=attention_weights,
                 system_prompt=system_prompt,
@@ -351,6 +418,10 @@ class MultiTurnReactAgent(FnCallAgent):
             if time.time() - start_time > 150 * 60:  # 150 minutes in seconds
                 prediction = 'No answer found after 2h30mins'
                 termination = 'No answer found after 2h30mins'
+                
+                # Save memory to file before returning
+                self._save_memory_to_file(question)
+                
                 result = {
                     "question": question,
                     "answer": answer,
@@ -457,6 +528,9 @@ class MultiTurnReactAgent(FnCallAgent):
                     prediction = full_messages[-1]['content']
                     termination = 'format error: generate an answer as token limit reached'
                 
+                # Save memory to file before returning
+                self._save_memory_to_file(question)
+                
                 result = {
                     "question": question,
                     "answer": answer,
@@ -474,6 +548,9 @@ class MultiTurnReactAgent(FnCallAgent):
             termination = 'answer not found'
             if num_llm_calls_available == 0:
                 termination = 'exceed available llm calls'
+        
+        # Save memory to file before returning
+        self._save_memory_to_file(question)
         
         result = {
             "question": question,

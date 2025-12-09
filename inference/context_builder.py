@@ -5,9 +5,13 @@ This module implements the weighted context reconstruction logic:
 - Uses attention weights to select representation levels for each chunk
 - Builds a focused context within token budget
 - Prioritizes recent chunks with full content
+- Logs which representation level is used for each chunk for debugging
 """
 
 import tiktoken
+import os
+import json
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from memory_store import MemoryChunk, ExternalMemoryStore
 
@@ -290,14 +294,18 @@ class ContextBuilder:
                               memory_store: ExternalMemoryStore,
                               attention_weights: Dict[int, float],
                               system_prompt: str = "",
-                              user_question: str = "") -> List[Dict]:
+                              user_question: str = "") -> Tuple[List[Dict], Dict[int, str]]:
         """
         Simplified context building that returns messages compatible with
         the existing react_agent format.
         
-        Returns messages in standard OpenAI format without complex assembly.
+        Returns:
+            Tuple of:
+                - messages: List of messages in standard OpenAI format
+                - chunk_levels: Dict mapping chunk_id to representation level used
         """
         all_chunks = memory_store.get_all_chunks()
+        chunk_levels = {}  # Track which level was used for each chunk
         
         # Start with system and user
         messages = []
@@ -306,7 +314,7 @@ class ContextBuilder:
         messages.append({"role": "user", "content": user_question})
         
         if not all_chunks:
-            return messages
+            return messages, chunk_levels
         
         # Separate recent from history
         recent_chunks = memory_store.get_recent_chunks(self.num_recent_full)
@@ -326,11 +334,13 @@ class ContextBuilder:
             for chunk in sorted(history_chunks, key=lambda c: c.id):
                 weight = attention_weights.get(chunk.id, 0.0)
                 level = self.select_representation_level(weight, num_history)
+                original_level = level  # Track original selection
                 
                 content = chunk.get_representation(level)
                 tokens = self.count_tokens(content)
                 
                 # Downgrade if over budget
+                downgraded = False
                 while tokens > 0 and used_tokens + tokens > available * 0.6:
                     if level == 'full':
                         level = 'summary_detailed'
@@ -342,6 +352,10 @@ class ContextBuilder:
                         break
                     content = chunk.get_representation(level)
                     tokens = self.count_tokens(content)
+                    downgraded = True
+                
+                # Record the final level used
+                chunk_levels[chunk.id] = level
                 
                 if level != 'omit' and tokens > 0:
                     formatted = self._format_chunk_content(chunk, content, level)
@@ -360,13 +374,60 @@ class ContextBuilder:
         # Add recent chunks in full (as proper turn alternation)
         for chunk in sorted(recent_chunks, key=lambda c: c.id):
             content = chunk.get_representation('full')
+            chunk_levels[chunk.id] = 'full (recent)'  # Mark as recent
             
             if chunk.type in ["assistant_response", "tool_call"]:
                 messages.append({"role": "assistant", "content": content})
             else:
                 messages.append({"role": "user", "content": content})
         
-        return messages
+        # Print detailed log for debugging
+        self._log_context_build(chunk_levels, attention_weights, num_history)
+        
+        return messages, chunk_levels
+    
+    def _log_context_build(self, 
+                           chunk_levels: Dict[int, str], 
+                           attention_weights: Dict[int, float],
+                           num_history: int):
+        """
+        Log detailed information about context building for debugging.
+        
+        Args:
+            chunk_levels: Dictionary mapping chunk_id to representation level
+            attention_weights: Dictionary mapping chunk_id to attention weight
+            num_history: Number of history chunks
+        """
+        print("\n" + "=" * 60)
+        print("[Context Build Log] Representation levels used for each chunk:")
+        print("-" * 60)
+        print(f"{'Chunk ID':<10} {'Type':<20} {'Weight':<12} {'Level':<20}")
+        print("-" * 60)
+        
+        # Sort by chunk ID for readability
+        for chunk_id in sorted(chunk_levels.keys()):
+            level = chunk_levels[chunk_id]
+            weight = attention_weights.get(chunk_id, 0.0)
+            
+            # Determine uniform weight for comparison
+            uniform = 1.0 / num_history if num_history > 0 else 1.0
+            relative = weight / uniform if uniform > 0 else 0
+            
+            # Add visual indicator
+            if 'recent' in level:
+                indicator = "🔵"  # Recent chunk
+            elif level == 'full':
+                indicator = "🟢"  # Full content
+            elif level == 'summary_detailed':
+                indicator = "🟡"  # Detailed summary
+            elif level == 'summary_brief':
+                indicator = "🟠"  # Brief summary
+            else:
+                indicator = "⚪"  # Placeholder
+            
+            print(f"{indicator} {chunk_id:<8} {'':<18} {weight:.4f} ({relative:.2f}x)  {level}")
+        
+        print("=" * 60 + "\n")
 
 
 # Singleton instance
