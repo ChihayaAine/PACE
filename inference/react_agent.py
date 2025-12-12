@@ -512,21 +512,15 @@ class MultiTurnReactAgent(FnCallAgent):
             # Add assistant response to full messages
             full_messages.append({"role": "assistant", "content": content.strip()})
             
-            # Add assistant response to memory store
-            if ENABLE_DYNAMIC_CONTEXT:
-                self._add_to_memory(
-                    content=content.strip(),
-                    chunk_type="assistant_response",
-                    metadata={"round": round_num}
-                )
-            
             if '<tool_call>' in content and '</tool_call>' in content:
                 tool_call = content.split('<tool_call>')[1].split('</tool_call>')[0]
+                tool_name = "unknown"
                 try:
                     if "python" in tool_call.lower():
                         try:
                             code_raw = content.split('<tool_call>')[1].split('</tool_call>')[0].split('<code>')[1].split('</code>')[0].strip()
                             result = TOOL_MAP['PythonInterpreter'].call(code_raw)
+                            tool_name = "PythonInterpreter"
                         except:
                             result = "[Python Interpreter Error]: Formatting error."
                     else:
@@ -541,12 +535,26 @@ class MultiTurnReactAgent(FnCallAgent):
                 tool_response = "<tool_response>\n" + result + "\n</tool_response>"
                 full_messages.append({"role": "user", "content": tool_response})
                 
-                # Add tool observation to memory store
+                # Add merged round_interaction to memory store (assistant + tool_observation)
+                # This combines thinking+tool_call+result into ONE chunk per round
+                if ENABLE_DYNAMIC_CONTEXT:
+                    round_content = (
+                        f"=== Round {round_num} Interaction ===\n"
+                        f"[Assistant Response]\n{content.strip()}\n\n"
+                        f"[Tool Observation]\n{tool_response}"
+                    )
+                    self._add_to_memory(
+                        content=round_content,
+                        chunk_type="round_interaction",
+                        metadata={"round": round_num, "tool_name": tool_name}
+                    )
+            else:
+                # No tool call, just add assistant response to memory
                 if ENABLE_DYNAMIC_CONTEXT:
                     self._add_to_memory(
-                        content=tool_response,
-                        chunk_type="tool_observation",
-                        metadata={"round": round_num, "tool_name": tool_name if 'tool_name' in dir() else "unknown"}
+                        content=content.strip(),
+                        chunk_type="assistant_response",
+                        metadata={"round": round_num}
                     )
             
             if '<answer>' in content and '</answer>' in content:

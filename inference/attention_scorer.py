@@ -210,7 +210,7 @@ class AttentionScorer:
                      memory_store: ExternalMemoryStore,
                      user_question: str = "",
                      num_recent: int = 2,
-                     temperature: float = 0.3) -> Dict[int, float]:
+                     temperature: float = 0.1) -> Dict[int, float]:
         """
         Compute attention scores for all historical chunks.
         
@@ -282,26 +282,32 @@ class AttentionScorer:
         else:
             weights = np.array([])
         
-        # Build result dictionary
+        # Build result dictionary and store raw similarities in chunks
         result = {}
+        raw_similarities = {}  # chunk_id -> raw cosine similarity
+        
         for i, chunk_id in enumerate(chunk_ids):
             result[chunk_id] = float(weights[i])
-            # Also update the chunk's relevance score
-            if chunk_id in [c.id for c in history_chunks]:
-                for c in history_chunks:
-                    if c.id == chunk_id:
-                        c.next_step_relevance = float(weights[i])
-                        break
+            raw_similarities[chunk_id] = float(similarities[i])
+            
+            # Update chunk's relevance score and store raw similarity
+            for c in history_chunks:
+                if c.id == chunk_id:
+                    c.next_step_relevance = float(weights[i])
+                    c.metadata["raw_similarity"] = float(similarities[i])
+                    break
         
         # Recent chunks always get weight 1.0 (they're included in full anyway)
         for chunk in recent_chunks:
             result[chunk.id] = 1.0
+            raw_similarities[chunk.id] = 1.0
             chunk.next_step_relevance = 1.0
+            chunk.metadata["raw_similarity"] = 1.0
         
         # Log statistics
         if similarities:
             print(f"[AttentionScorer] Scored {len(history_chunks)} history chunks, "
-                  f"sim range: [{min(similarities):.3f}, {max(similarities):.3f}], "
+                  f"raw_sim range: [{min(similarities):.4f}, {max(similarities):.4f}], "
                   f"weight range: [{min(weights):.4f}, {max(weights):.4f}]")
         
         return result

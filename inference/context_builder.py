@@ -382,15 +382,16 @@ class ContextBuilder:
             else:
                 messages.append({"role": "user", "content": content})
         
-        # Print detailed log for debugging
-        self._log_context_build(chunk_levels, attention_weights, num_history)
+        # Print detailed log for debugging (now with raw similarities)
+        self._log_context_build(chunk_levels, attention_weights, num_history, memory_store)
         
         return messages, chunk_levels
     
     def _log_context_build(self, 
                            chunk_levels: Dict[int, str], 
                            attention_weights: Dict[int, float],
-                           num_history: int):
+                           num_history: int,
+                           memory_store: ExternalMemoryStore = None):
         """
         Log detailed information about context building for debugging.
         
@@ -398,17 +399,32 @@ class ContextBuilder:
             chunk_levels: Dictionary mapping chunk_id to representation level
             attention_weights: Dictionary mapping chunk_id to attention weight
             num_history: Number of history chunks
+            memory_store: Optional memory store to retrieve raw similarities
         """
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 80)
         print("[Context Build Log] Representation levels used for each chunk:")
-        print("-" * 60)
-        print(f"{'Chunk ID':<10} {'Type':<20} {'Weight':<12} {'Level':<20}")
-        print("-" * 60)
+        print("-" * 80)
+        print(f"{'ID':<6} {'Type':<20} {'Raw Sim':<10} {'Weight':<12} {'Rel':<8} {'Level':<15}")
+        print("-" * 80)
+        
+        # Build chunk lookup for raw similarity
+        chunk_lookup = {}
+        if memory_store:
+            for chunk in memory_store.get_all_chunks():
+                chunk_lookup[chunk.id] = chunk
         
         # Sort by chunk ID for readability
         for chunk_id in sorted(chunk_levels.keys()):
             level = chunk_levels[chunk_id]
             weight = attention_weights.get(chunk_id, 0.0)
+            
+            # Get raw similarity from chunk metadata
+            raw_sim = 0.0
+            chunk_type = ""
+            if chunk_id in chunk_lookup:
+                chunk = chunk_lookup[chunk_id]
+                raw_sim = chunk.metadata.get("raw_similarity", 0.0)
+                chunk_type = chunk.type[:18] if len(chunk.type) > 18 else chunk.type
             
             # Determine uniform weight for comparison
             uniform = 1.0 / num_history if num_history > 0 else 1.0
@@ -426,9 +442,9 @@ class ContextBuilder:
             else:
                 indicator = "⚪"  # Placeholder
             
-            print(f"{indicator} {chunk_id:<8} {'':<18} {weight:.4f} ({relative:.2f}x)  {level}")
+            print(f"{indicator} {chunk_id:<4} {chunk_type:<20} {raw_sim:<10.4f} {weight:<12.4f} {relative:<8.2f}x {level}")
         
-        print("=" * 60 + "\n")
+        print("=" * 80 + "\n")
 
 
 # Singleton instance
