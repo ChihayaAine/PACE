@@ -210,7 +210,7 @@ class AttentionScorer:
                      memory_store: ExternalMemoryStore,
                      user_question: str = "",
                      num_recent: int = 2,
-                     temperature: float = 1.0) -> Dict[int, float]:
+                     temperature: float = 0.3) -> Dict[int, float]:
         """
         Compute attention scores for all historical chunks.
         
@@ -218,7 +218,7 @@ class AttentionScorer:
             memory_store: The external memory store containing all chunks
             user_question: The original user question (included in query)
             num_recent: Number of recent chunks to use as part of query (current state)
-            temperature: Temperature for softmax (lower = sharper distribution)
+            temperature: Temperature for softmax (lower = sharper distribution, default 0.3)
         
         Returns:
             Dictionary mapping chunk_id to attention weight (after softmax normalization)

@@ -28,12 +28,13 @@ class ContextBuilder:
     # Default thresholds for representation level selection
     # These are applied AFTER softmax normalization
     # Since softmax outputs sum to 1, with many chunks each weight will be small
-    # We use relative thresholds based on uniform distribution
+    # We use relative thresholds based on uniform distribution (1/N)
+    # With temperature=0.3, distribution is sharper, so thresholds are lower
     DEFAULT_THRESHOLDS = {
-        "a": 0.5,   # Below this: placeholder/omit (relative to uniform)
-        "b": 1.0,   # a < w <= b: summary_brief (relative to uniform)
-        "c": 2.0,   # b < w <= c: summary_detailed (relative to uniform)
-        # w > c: full
+        "a": 0.4,   # Below 0.4x uniform: placeholder (bottom ~20%)
+        "b": 0.8,   # 0.4-0.8x uniform: summary_brief (low relevance)
+        "c": 1.5,   # 0.8-1.5x uniform: summary_detailed (medium relevance)
+        # w > 1.5x uniform: full (high relevance, top ~15-20%)
     }
     
     def __init__(self,
