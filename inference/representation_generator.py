@@ -82,11 +82,24 @@ Output ONLY the JSON, no other text."""
         # Alibaba IAI Gemini Client (Primary)
         # ========================================================================
         PROJECT_ENV = os.getenv('PROJECT_ENV', 'local')
+        print(f"[RepresentationGenerator] PROJECT_ENV={PROJECT_ENV}")
         if PROJECT_ENV == "local":
-            empid = os.getenv('EMPID', 'buyer-agent-daily')
+            empid = os.getenv('EMPID')
+            print(f"[RepresentationGenerator] EMPID from env: {empid}")
+            if not empid:
+                print("[RepresentationGenerator] WARNING: EMPID environment variable not set!")
+                print("[RepresentationGenerator] Please set your employee ID: export EMPID=your-employee-id")
+                print("[RepresentationGenerator] Falling back to rule-based summarization.")
+                self.client = None
+                self.model_name = None
+            else:
+                self._init_iai_client(empid)
         else:
             empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
+            self._init_iai_client(empid)
         
+    def _init_iai_client(self, empid: str):
+        """Initialize Alibaba IAI client with the given empId."""
         self.client = OpenAI(
             default_headers={'empId': empid, 'iai-tag': 'accio'},
             api_key="icbu-buyer-agent-algo",
@@ -94,7 +107,6 @@ Output ONLY the JSON, no other text."""
             timeout=120.0
         )
         self.model_name = "gemini-2.5-pro"  # Alibaba IAI Gemini model
-        
         print(f"[RepresentationGenerator] Using Alibaba IAI Gemini: model={self.model_name}, empid={empid}")
         
         # ========================================================================
@@ -210,12 +222,14 @@ Output ONLY the JSON, no other text."""
                 max_tokens=3000
             )
             
-            # Debug: print response structure
-            print(f"[RepresentationGenerator] Response type: {type(response)}, Response: {response}")
+            # Handle API error response (Alibaba IAI specific)
+            if hasattr(response, 'success') and response.success == False:
+                print(f"[RepresentationGenerator] API Error: code={getattr(response, 'code', 'N/A')}, message={getattr(response, 'message', 'N/A')}")
+                return None
             
             # Handle None or empty response
             if not response or not response.choices:
-                print(f"[RepresentationGenerator] Empty response from API")
+                print(f"[RepresentationGenerator] Empty response from API: {response}")
                 return None
             
             choice = response.choices[0]
