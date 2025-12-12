@@ -339,9 +339,10 @@ class MultiTurnReactAgent(FnCallAgent):
         if not ENABLE_DYNAMIC_CONTEXT or self.memory_store is None:
             return None
         
-        # Generate multi-level representations
+        # Generate multi-level representations (with user goal for goal-aware extraction)
         try:
-            representations = self.rep_generator.generate_representations(content, chunk_type)
+            user_goal = getattr(self, 'user_prompt', '') or ''
+            representations = self.rep_generator.generate_representations(content, chunk_type, user_goal=user_goal)
         except Exception as e:
             print(f"[Agent] Warning: Failed to generate representations: {e}")
             representations = {

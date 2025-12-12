@@ -26,24 +26,38 @@ class RepresentationGenerator:
     hierarchical summaries at different detail levels.
     """
     
-    # Prompt template for generating multi-level representations
-    MULTI_LEVEL_PROMPT = """You are a content summarization expert. Given the following content from an agent interaction step, generate THREE levels of summary plus keywords.
+    # NEW: Prompt for summary_detailed - extracts goal-relevant information
+    DETAILED_EXTRACTOR_PROMPT = """Please process the following webpage content and user goal to extract relevant information:
+
+## **Webpage Content** 
+{webpage_content}
+
+## **User Goal**
+{goal}
+
+## **Task Guidelines**
+1. **Content Scanning for Rational**: Locate the **specific sections/data** directly related to the user's goal within the webpage content
+
+2. **Key Extraction for Evidence**: Identify and extract the **most relevant information** from the content, you never miss any important information, output the **full original context** of the content as far as possible, it can be more than three paragraphs.
+
+3. **Summary Output for Summary**: Organize into a concise paragraph with logical flow, prioritizing clarity and judge the contribution of the information to the goal.
+
+**Final Output Format using JSON format has "rational", "evidence", "summary" fields**
+"""
+
+    # Prompt template for summary_brief and keywords (unchanged)
+    BRIEF_KEYWORDS_PROMPT = """You are a content summarization expert. Given the following content, generate a brief summary and keywords.
 
 ## Original Content
 {content}
 
 ## Task
-Generate summaries at different detail levels:
+1. **summary_brief**: A brief summary (1-2 sentences) capturing only the core action and result. Be extremely concise.
 
-1. **summary_detailed**: A detailed summary (2-3 paragraphs) that preserves all important information, data, numbers, and context. Keep specific facts, URLs, dates, and key findings.
-
-2. **summary_brief**: A brief summary (1-2 sentences) capturing only the core action and result. Be extremely concise.
-
-3. **keywords**: Extract 5-10 important keywords/entities (names, numbers, technical terms, key concepts).
+2. **keywords**: Extract 5-10 important keywords/entities (names, numbers, technical terms, key concepts).
 
 ## Output Format (JSON)
 {{
-  "summary_detailed": "...",
   "summary_brief": "...",
   "keywords": ["keyword1", "keyword2", ...]
 }}
@@ -98,13 +112,14 @@ Output ONLY the JSON, no other text."""
             char_limit = max_tokens * 4
             return text[:char_limit] if len(text) > char_limit else text
     
-    def generate_representations(self, content: str, content_type: str = "unknown") -> Dict:
+    def generate_representations(self, content: str, content_type: str = "unknown", user_goal: str = "") -> Dict:
         """
         Generate multi-level representations for the given content.
         
         Args:
             content: The original content to summarize
             content_type: Type of content (e.g., "tool_observation", "assistant_response")
+            user_goal: The user's original question/goal (used for goal-aware extraction)
         
         Returns:
             Dictionary with keys: full, summary_detailed, summary_brief, keywords
@@ -128,9 +143,19 @@ Output ONLY the JSON, no other text."""
         # Try to use LLM for summarization
         if self.client and self.model_name:
             try:
-                llm_result = self._generate_with_llm(content)
-                if llm_result:
-                    result.update(llm_result)
+                # Generate summary_detailed using the new DETAILED_EXTRACTOR_PROMPT
+                detailed_result = self._generate_detailed_with_llm(content, user_goal)
+                if detailed_result:
+                    result["summary_detailed"] = detailed_result
+                
+                # Generate summary_brief and keywords using BRIEF_KEYWORDS_PROMPT
+                brief_result = self._generate_brief_with_llm(content)
+                if brief_result:
+                    result["summary_brief"] = brief_result.get("summary_brief", "")
+                    result["keywords"] = brief_result.get("keywords", [])
+                
+                # If we got at least one result, return
+                if detailed_result or brief_result:
                     return result
             except Exception as e:
                 print(f"[RepresentationGenerator] LLM summarization failed: {e}")
@@ -142,25 +167,82 @@ Output ONLY the JSON, no other text."""
         
         return result
     
-    def _generate_with_llm(self, content: str) -> Optional[Dict]:
-        """Generate representations using LLM."""
+    def _generate_detailed_with_llm(self, content: str, user_goal: str = "") -> Optional[str]:
+        """
+        Generate summary_detailed using the DETAILED_EXTRACTOR_PROMPT.
+        
+        This prompt extracts goal-relevant information with rational, evidence, and summary.
+        The 'evidence' field is used as summary_detailed.
+        """
         # Truncate content if too long
         truncated_content = self.truncate_to_tokens(content, self.max_input_tokens)
         
-        prompt = self.MULTI_LEVEL_PROMPT.format(content=truncated_content)
+        # Use user_goal if provided, otherwise use a generic goal
+        goal = user_goal if user_goal else "Extract and summarize the key information from this content."
+        
+        prompt = self.DETAILED_EXTRACTOR_PROMPT.format(
+            webpage_content=truncated_content,
+            goal=goal
+        )
         
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=2000
+                max_tokens=3000
             )
             
             response_text = response.choices[0].message.content.strip()
             
             # Parse JSON response
-            # Try to extract JSON if wrapped in markdown
+            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                response_text = json_match.group(1)
+            
+            # Find JSON object
+            start = response_text.find('{')
+            end = response_text.rfind('}') + 1
+            if start != -1 and end > start:
+                json_str = response_text[start:end]
+                parsed = json.loads(json_str)
+                
+                # Combine rational + evidence + summary for comprehensive summary_detailed
+                parts = []
+                if parsed.get("rational"):
+                    parts.append(f"[Rational] {parsed['rational']}")
+                if parsed.get("evidence"):
+                    parts.append(f"[Evidence] {parsed['evidence']}")
+                if parsed.get("summary"):
+                    parts.append(f"[Summary] {parsed['summary']}")
+                
+                return "\n\n".join(parts) if parts else parsed.get("evidence", "")
+                
+        except Exception as e:
+            print(f"[RepresentationGenerator] Error in detailed extraction: {e}")
+        
+        return None
+    
+    def _generate_brief_with_llm(self, content: str) -> Optional[Dict]:
+        """
+        Generate summary_brief and keywords using BRIEF_KEYWORDS_PROMPT.
+        """
+        # Truncate content if too long
+        truncated_content = self.truncate_to_tokens(content, self.max_input_tokens)
+        
+        prompt = self.BRIEF_KEYWORDS_PROMPT.format(content=truncated_content)
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=500
+            )
+            
+            response_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON response
             json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)
             if json_match:
                 response_text = json_match.group(1)
@@ -173,12 +255,11 @@ Output ONLY the JSON, no other text."""
                 parsed = json.loads(json_str)
                 
                 return {
-                    "summary_detailed": parsed.get("summary_detailed", ""),
                     "summary_brief": parsed.get("summary_brief", ""),
                     "keywords": parsed.get("keywords", [])
                 }
         except Exception as e:
-            print(f"[RepresentationGenerator] Error parsing LLM response: {e}")
+            print(f"[RepresentationGenerator] Error parsing brief/keywords: {e}")
         
         return None
     
