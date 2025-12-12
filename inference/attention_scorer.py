@@ -210,7 +210,7 @@ class AttentionScorer:
                      memory_store: ExternalMemoryStore,
                      user_question: str = "",
                      num_recent: int = 2,
-                     temperature: float = 0.1) -> Dict[int, float]:
+                     temperature: float = 0.3) -> Dict[int, float]:
         """
         Compute attention scores for all historical chunks.
         

@@ -401,8 +401,8 @@ class MultiTurnReactAgent(FnCallAgent):
                 attention_weights = self.attention_scorer.score_chunks(
                     self.memory_store,
                     user_question=user_question,
-                    num_recent=NUM_RECENT_FULL,
-                    temperature=1.0
+                    num_recent=NUM_RECENT_FULL
+                    # temperature defaults to 0.1 for sharper distribution
                 )
                 # Update weights in memory store
                 self.memory_store.update_attention_weights(attention_weights)
