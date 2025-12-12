@@ -76,15 +76,38 @@ Output ONLY the JSON, no other text."""
             model_name: Model name to use for summarization
             max_input_tokens: Maximum input tokens before truncation
         """
-        self.api_key = api_key or os.environ.get("API_KEY", "")
-        self.api_base = api_base or os.environ.get("API_BASE", "")
-        self.model_name = model_name or os.environ.get("SUMMARY_MODEL_NAME", "")
         self.max_input_tokens = max_input_tokens
         
-        # Initialize OpenAI client if credentials available
-        self.client = None
-        if self.api_key and self.api_base:
-            self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+        # ========================================================================
+        # Alibaba IAI Gemini Client (Primary)
+        # ========================================================================
+        PROJECT_ENV = os.getenv('PROJECT_ENV', 'local')
+        if PROJECT_ENV == "local":
+            empid = os.getenv('EMPID', 'buyer-agent-daily')
+        else:
+            empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
+        
+        self.client = OpenAI(
+            default_headers={'empId': empid, 'iai-tag': 'accio'},
+            api_key="icbu-buyer-agent-algo",
+            base_url="https://iai.alibaba-inc.com/aidc/v1",
+            timeout=120.0
+        )
+        self.model_name = "gemini-2.5-pro"  # Alibaba IAI Gemini model
+        
+        print(f"[RepresentationGenerator] Using Alibaba IAI Gemini: model={self.model_name}, empid={empid}")
+        
+        # ========================================================================
+        # OpenRouter Client (Backup - commented out)
+        # ========================================================================
+        # self.api_key = api_key or os.environ.get("API_KEY", "")
+        # self.api_base = api_base or os.environ.get("API_BASE", "")
+        # self.model_name = model_name or os.environ.get("SUMMARY_MODEL_NAME", "")
+        # 
+        # # Initialize OpenAI client if credentials available
+        # self.client = None
+        # if self.api_key and self.api_base:
+        #     self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
         
         # Token encoder for truncation
         try:
@@ -139,7 +162,8 @@ Output ONLY the JSON, no other text."""
             return result
         
         # Try to use LLM for summarization (single call for all levels)
-        if self.client and self.model_name:
+        # Now using Alibaba IAI Gemini API
+        if self.client:
             try:
                 llm_result = self._generate_all_with_llm(content, user_goal)
                 if llm_result:
@@ -159,6 +183,8 @@ Output ONLY the JSON, no other text."""
         """
         Generate all representation levels in a single LLM call.
         
+        Uses Alibaba IAI Gemini API (gemini-2.5-pro).
+        
         Returns:
             Dict with summary_detailed, summary_brief, and keywords
         """
@@ -174,6 +200,9 @@ Output ONLY the JSON, no other text."""
         )
         
         try:
+            # ================================================================
+            # Alibaba IAI Gemini API call
+            # ================================================================
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -182,6 +211,17 @@ Output ONLY the JSON, no other text."""
             )
             
             response_text = response.choices[0].message.content.strip()
+            
+            # ================================================================
+            # OpenRouter API call (commented out - backup)
+            # ================================================================
+            # response = self.client.chat.completions.create(
+            #     model=self.model_name,
+            #     messages=[{"role": "user", "content": prompt}],
+            #     temperature=0.3,
+            #     max_tokens=3000
+            # )
+            # response_text = response.choices[0].message.content.strip()
             
             # Parse JSON response
             json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)
@@ -214,6 +254,8 @@ Output ONLY the JSON, no other text."""
                 
         except Exception as e:
             print(f"[RepresentationGenerator] Error in LLM extraction: {e}")
+            import traceback
+            traceback.print_exc()
         
         return None
     
