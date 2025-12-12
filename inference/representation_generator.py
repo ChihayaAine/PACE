@@ -210,7 +210,21 @@ Output ONLY the JSON, no other text."""
                 max_tokens=3000
             )
             
-            response_text = response.choices[0].message.content.strip()
+            # Debug: print response structure
+            print(f"[RepresentationGenerator] Response type: {type(response)}, Response: {response}")
+            
+            # Handle None or empty response
+            if not response or not response.choices:
+                print(f"[RepresentationGenerator] Empty response from API")
+                return None
+            
+            choice = response.choices[0]
+            if not choice.message or choice.message.content is None:
+                # Some models return content in different fields
+                print(f"[RepresentationGenerator] No content in response. Choice: {choice}")
+                return None
+            
+            response_text = choice.message.content.strip()
             
             # ================================================================
             # OpenRouter API call (commented out - backup)
