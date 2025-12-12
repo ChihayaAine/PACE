@@ -98,16 +98,11 @@ Output ONLY the JSON, no other text."""
             empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
             self._init_iai_client(empid)
         
-    def _init_iai_client(self, empid: str):
-        """Initialize Alibaba IAI client with the given empId."""
-        self.client = OpenAI(
-            default_headers={'empId': empid, 'iai-tag': 'accio'},
-            api_key="icbu-buyer-agent-algo",
-            base_url="https://iai.alibaba-inc.com/aidc/v1",
-            timeout=120.0
-        )
-        self.model_name = "gemini-2.5-pro"  # Alibaba IAI Gemini model
-        print(f"[RepresentationGenerator] Using Alibaba IAI Gemini: model={self.model_name}, empid={empid}")
+        # Token encoder for truncation (must be initialized regardless of API)
+        try:
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+        except:
+            self.encoding = None
         
         # ========================================================================
         # OpenRouter Client (Backup - commented out)
@@ -121,11 +116,16 @@ Output ONLY the JSON, no other text."""
         # if self.api_key and self.api_base:
         #     self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
         
-        # Token encoder for truncation
-        try:
-            self.encoding = tiktoken.get_encoding("cl100k_base")
-        except:
-            self.encoding = None
+    def _init_iai_client(self, empid: str):
+        """Initialize Alibaba IAI client with the given empId."""
+        self.client = OpenAI(
+            default_headers={'empId': empid, 'iai-tag': 'accio'},
+            api_key="icbu-buyer-agent-algo",
+            base_url="https://iai.alibaba-inc.com/aidc/v1",
+            timeout=120.0
+        )
+        self.model_name = "gemini-2.5-pro"  # Alibaba IAI Gemini model
+        print(f"[RepresentationGenerator] Using Alibaba IAI Gemini: model={self.model_name}, empid={empid}")
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text."""
