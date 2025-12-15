@@ -52,9 +52,9 @@ def test_gemini():
     try:
         response = client.chat.completions.create(
             model=model_name,
-            messages=[{"role": "user", "content": "Hello, please respond with 'API test successful!'"}],
+            messages=[{"role": "user", "content": "什么是原神？请简要回答。"}],
             temperature=0.3,
-            max_tokens=100
+            max_tokens=2000
         )
         
         # 检查阿里 IAI 特有的错误响应
