@@ -78,31 +78,46 @@ Output ONLY the JSON, no other text."""
         """
         self.max_input_tokens = max_input_tokens
         
-        # ========================================================================
-        # Alibaba IAI Gemini Client (Primary)
-        # ========================================================================
-        PROJECT_ENV = os.getenv('PROJECT_ENV', 'local')
-        print(f"[RepresentationGenerator] PROJECT_ENV={PROJECT_ENV}")
-        if PROJECT_ENV == "local":
-            empid = os.getenv('EMPID')
-            print(f"[RepresentationGenerator] EMPID from env: {empid}")
-            if not empid:
-                print("[RepresentationGenerator] WARNING: EMPID environment variable not set!")
-                print("[RepresentationGenerator] Please set your employee ID: export EMPID=your-employee-id")
-                print("[RepresentationGenerator] Falling back to rule-based summarization.")
-                self.client = None
-                self.model_name = None
-            else:
-                self._init_iai_client(empid)
-        else:
-            empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
-            self._init_iai_client(empid)
-        
-        # Token encoder for truncation (must be initialized regardless of API)
+        # Token encoder for truncation
         try:
             self.encoding = tiktoken.get_encoding("cl100k_base")
         except:
             self.encoding = None
+        
+        # ========================================================================
+        # Alibaba IAI Gemini Client (same as accio-agent-task)
+        # ========================================================================
+        PROJECT_ENV = os.getenv('PROJECT_ENV', 'local')
+        
+        if PROJECT_ENV == 'local':
+            empid = os.getenv('EMPID')
+            if not empid:
+                raise ValueError(
+                    "EMPID environment variable is required for local environment. "
+                    "Please set EMPID environment variable with your employee ID. "
+                    "Example: export EMPID=your-employee-id"
+                )
+        else:
+            empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
+        
+        # Use /google endpoint for Gemini models
+        google_endpoint = (
+            'http://iai.vipserver:7001/google'
+            if PROJECT_ENV == 'online'
+            else 'https://iai.alibaba-inc.com/google'
+        )
+        api_key = "accio-agent" if PROJECT_ENV in ["online", "pre"] else "icbu-buyer-agent-algo"
+        
+        self.client = OpenAI(
+            default_headers={'empId': empid, 'iai-tag': 'accio'},
+            api_key=api_key,
+            base_url=google_endpoint,
+            timeout=120.0,
+            max_retries=3
+        )
+        self.model_name = "google/gemini-2.5-pro"
+        
+        print(f"[RepresentationGenerator] Initialized: model={self.model_name}, empid={empid}, endpoint={google_endpoint}")
         
         # ========================================================================
         # OpenRouter Client (Backup - commented out)
@@ -115,17 +130,6 @@ Output ONLY the JSON, no other text."""
         # self.client = None
         # if self.api_key and self.api_base:
         #     self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
-        
-    def _init_iai_client(self, empid: str):
-        """Initialize Alibaba IAI client with the given empId."""
-        self.client = OpenAI(
-            default_headers={'empId': empid, 'iai-tag': 'accio'},
-            api_key="icbu-buyer-agent-algo",
-            base_url="https://iai.alibaba-inc.com/aidc/v1",
-            timeout=120.0
-        )
-        self.model_name = "gemini-2.5-pro"  # Alibaba IAI Gemini model
-        print(f"[RepresentationGenerator] Using Alibaba IAI Gemini: model={self.model_name}, empid={empid}")
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text."""
