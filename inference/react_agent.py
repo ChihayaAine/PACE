@@ -29,6 +29,8 @@ import time
 import asyncio
 import random
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Tool imports
 from tool_file import *
@@ -57,6 +59,10 @@ NUM_RECENT_FULL = int(os.getenv('NUM_RECENT_FULL', 2))
 # Memory logs directory
 MEMORY_LOGS_DIR = os.path.join(os.path.dirname(__file__), "memory_logs")
 os.makedirs(MEMORY_LOGS_DIR, exist_ok=True)
+
+# Dynamic context logs directory (for analyzing repeated tool_call issues)
+CONTEXT_LOGS_DIR = os.path.join(os.path.dirname(__file__), "context_logs")
+os.makedirs(CONTEXT_LOGS_DIR, exist_ok=True)
 
 # Attention thresholds (relative to uniform distribution)
 ATTENTION_THRESHOLD_A = float(os.getenv('ATTENTION_THRESHOLD_A', 0.3))  # Below: placeholder
@@ -102,6 +108,13 @@ class MultiTurnReactAgent(FnCallAgent):
         self.attention_scorer = None
         self.context_builder = None
         self.current_log_filepath = None  # Current task's log file path
+        self.current_context_log_filepath = None  # Context log file for debugging
+        
+        # Thread pool for async representation generation (non-blocking)
+        # Since recent chunks always use "full", we don't need to wait for summaries
+        self._rep_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rep_gen")
+        self._pending_rep_futures = {}  # chunk_id -> Future
+        self._rep_lock = threading.Lock()
         
         if ENABLE_DYNAMIC_CONTEXT:
             self._init_dynamic_context()
@@ -143,6 +156,7 @@ class MultiTurnReactAgent(FnCallAgent):
         """
         Initialize a new memory log file at the start of each task.
         Creates the file immediately with header information.
+        Also creates a context log file for debugging repeated tool_call issues.
         
         Args:
             question: The user's question for this task
@@ -158,6 +172,10 @@ class MultiTurnReactAgent(FnCallAgent):
         filename = f"memory_{timestamp}.json"
         self.current_log_filepath = os.path.join(MEMORY_LOGS_DIR, filename)
         
+        # Also create context log file
+        context_filename = f"context_{timestamp}.json"
+        self.current_context_log_filepath = os.path.join(CONTEXT_LOGS_DIR, context_filename)
+        
         # Initialize log data structure
         log_data = {
             "timestamp": datetime.now().isoformat(),
@@ -166,15 +184,29 @@ class MultiTurnReactAgent(FnCallAgent):
             "chunks": []
         }
         
-        # Write initial file
+        # Initialize context log data structure
+        context_log_data = {
+            "timestamp": datetime.now().isoformat(),
+            "question": question,
+            "status": "in_progress",
+            "contexts": []  # Each element: {"round": N, "messages": [...], "chunk_levels": {...}}
+        }
+        
+        # Write initial files
         try:
             with open(self.current_log_filepath, 'w', encoding='utf-8') as f:
                 json.dump(log_data, f, ensure_ascii=False, indent=2)
             print(f"[Memory] Created log file: {self.current_log_filepath}")
+            
+            with open(self.current_context_log_filepath, 'w', encoding='utf-8') as f:
+                json.dump(context_log_data, f, ensure_ascii=False, indent=2)
+            print(f"[Context] Created context log file: {self.current_context_log_filepath}")
+            
             return self.current_log_filepath
         except Exception as e:
             print(f"[Memory] Error creating log file: {e}")
             self.current_log_filepath = None
+            self.current_context_log_filepath = None
             return None
     
     def _append_chunk_to_log(self, chunk):
@@ -243,6 +275,68 @@ class MultiTurnReactAgent(FnCallAgent):
             print(f"[Memory] Finalized log file: {self.current_log_filepath}")
         except Exception as e:
             print(f"[Memory] Error finalizing log: {e}")
+        
+        # Also finalize context log
+        if self.current_context_log_filepath:
+            try:
+                with open(self.current_context_log_filepath, 'r', encoding='utf-8') as f:
+                    context_data = json.load(f)
+                
+                context_data["status"] = "completed"
+                context_data["termination"] = termination
+                context_data["completed_at"] = datetime.now().isoformat()
+                
+                with open(self.current_context_log_filepath, 'w', encoding='utf-8') as f:
+                    json.dump(context_data, f, ensure_ascii=False, indent=2)
+                
+                print(f"[Context] Finalized context log file: {self.current_context_log_filepath}")
+            except Exception as e:
+                print(f"[Context] Error finalizing context log: {e}")
+
+    def _log_dynamic_context(self, round_num: int, messages: List[Dict], chunk_levels: Dict = None):
+        """
+        Log the dynamic context sent to the main agent for debugging.
+        
+        Args:
+            round_num: The current round number
+            messages: The messages sent to the LLM
+            chunk_levels: Optional dict mapping chunk_id to representation level used
+        """
+        if not ENABLE_DYNAMIC_CONTEXT or self.current_context_log_filepath is None:
+            return
+        
+        try:
+            # Read current file
+            with open(self.current_context_log_filepath, 'r', encoding='utf-8') as f:
+                context_data = json.load(f)
+            
+            # Prepare context entry
+            context_entry = {
+                "round": round_num,
+                "timestamp": datetime.now().isoformat(),
+                "num_messages": len(messages),
+                "chunk_levels": chunk_levels or {},
+                "messages": []
+            }
+            
+            # Store messages (with content truncation for large messages)
+            for msg in messages:
+                msg_copy = {
+                    "role": msg.get("role", ""),
+                    "content": msg.get("content", "")
+                }
+                # Keep full content for analysis
+                context_entry["messages"].append(msg_copy)
+            
+            context_data["contexts"].append(context_entry)
+            
+            # Write back to file
+            with open(self.current_context_log_filepath, 'w', encoding='utf-8') as f:
+                json.dump(context_data, f, ensure_ascii=False, indent=2)
+            
+            print(f"[Context] Logged context for round {round_num} ({len(messages)} messages)")
+        except Exception as e:
+            print(f"[Context] Error logging context: {e}")
 
     def sanity_check_output(self, content):
         return "<think>" in content and "</think>" in content
@@ -331,6 +425,11 @@ class MultiTurnReactAgent(FnCallAgent):
         """
         Add a new interaction to the memory store with multi-level representations.
         
+        OPTIMIZATION: Representation generation is now ASYNC/non-blocking.
+        Since recent NUM_RECENT_FULL chunks always use "full" representation,
+        we don't need to wait for summaries before the next step.
+        Summaries are generated in background and updated when ready.
+        
         Args:
             content: The full content of this step
             chunk_type: Type of chunk (e.g., "assistant_response", "tool_observation")
@@ -339,32 +438,28 @@ class MultiTurnReactAgent(FnCallAgent):
         if not ENABLE_DYNAMIC_CONTEXT or self.memory_store is None:
             return None
         
-        # Generate multi-level representations (with user goal for goal-aware extraction)
-        try:
-            user_goal = getattr(self, 'user_prompt', '') or ''
-            representations = self.rep_generator.generate_representations(content, chunk_type, user_goal=user_goal)
-        except Exception as e:
-            print(f"[Agent] Warning: Failed to generate representations: {e}")
-            representations = {
-                "full": content,
-                "summary_detailed": content[:2000] if len(content) > 2000 else content,
-                "summary_brief": content[:200] if len(content) > 200 else content,
-                "keywords": []
-            }
+        # Step 1: Add chunk immediately with fallback representations (NON-BLOCKING)
+        # This allows the next step to proceed without waiting for LLM summarization
+        fallback_representations = {
+            "full": content,
+            "summary_detailed": content[:2000] if len(content) > 2000 else content,
+            "summary_brief": content[:200] if len(content) > 200 else content,
+            "keywords": []
+        }
         
-        # Add to memory store
         chunk = self.memory_store.add_chunk(
             chunk_type=chunk_type,
-            full_content=representations["full"],
-            summary_detailed=representations["summary_detailed"],
-            summary_brief=representations["summary_brief"],
-            keywords=representations["keywords"],
+            full_content=fallback_representations["full"],
+            summary_detailed=fallback_representations["summary_detailed"],
+            summary_brief=fallback_representations["summary_brief"],
+            keywords=fallback_representations["keywords"],
             metadata=metadata or {}
         )
         
-        print(f"[Memory] Added chunk {chunk.id} ({chunk_type}), keywords: {representations['keywords'][:5]}")
+        print(f"[Memory] Added chunk {chunk.id} ({chunk_type}) [async rep generation started]")
         
-        # Compute-on-Write: Pre-compute key vector (embedding) for this chunk
+        # Step 2: Compute embedding immediately (fast, using full content)
+        # This is needed for attention scoring and is fast enough to do sync
         if self.attention_scorer is not None:
             try:
                 self.attention_scorer.compute_embeddings_for_chunk(chunk)
@@ -373,18 +468,82 @@ class MultiTurnReactAgent(FnCallAgent):
             except Exception as e:
                 print(f"[Memory] Warning: Failed to pre-compute embedding for chunk {chunk.id}: {e}")
         
+        # Step 3: Submit async task to generate proper representations (NON-BLOCKING)
+        # Since recent chunks use "full" anyway, this doesn't block next step
+        user_goal = getattr(self, 'user_prompt', '') or ''
+        future = self._rep_executor.submit(
+            self._generate_representations_async,
+            chunk.id, content, chunk_type, user_goal
+        )
+        
+        with self._rep_lock:
+            self._pending_rep_futures[chunk.id] = future
+        
         # Real-time: Append chunk to log file immediately
         self._append_chunk_to_log(chunk)
         
         return chunk
+    
+    def _generate_representations_async(self, chunk_id: int, content: str, chunk_type: str, user_goal: str):
+        """
+        Generate representations in background thread and update chunk when ready.
+        
+        This is called async by ThreadPoolExecutor.
+        """
+        try:
+            print(f"[Memory] Async generating representations for chunk {chunk_id}...")
+            representations = self.rep_generator.generate_representations(content, chunk_type, user_goal=user_goal)
+            
+            # Update chunk with proper representations
+            if self.memory_store is not None:
+                chunk = self.memory_store.get_chunk(chunk_id)
+                if chunk is not None:
+                    chunk.representations["summary_detailed"] = representations["summary_detailed"]
+                    chunk.representations["summary_brief"] = representations["summary_brief"]
+                    chunk.representations["keywords"] = representations["keywords"]
+                    print(f"[Memory] Updated chunk {chunk_id} with generated representations, keywords: {representations['keywords'][:5]}")
+            
+            # Remove from pending
+            with self._rep_lock:
+                if chunk_id in self._pending_rep_futures:
+                    del self._pending_rep_futures[chunk_id]
+                    
+        except Exception as e:
+            print(f"[Memory] Async rep generation failed for chunk {chunk_id}: {e}")
+            # Keep fallback representations
+            with self._rep_lock:
+                if chunk_id in self._pending_rep_futures:
+                    del self._pending_rep_futures[chunk_id]
+    
+    def _wait_for_pending_representations(self, timeout: float = 5.0):
+        """
+        Wait for pending representation generations to complete.
+        Called before building context for old chunks that might need summaries.
+        
+        Args:
+            timeout: Max seconds to wait per chunk
+        """
+        with self._rep_lock:
+            pending = list(self._pending_rep_futures.items())
+        
+        if not pending:
+            return
+        
+        print(f"[Memory] Waiting for {len(pending)} pending representation generations...")
+        for chunk_id, future in pending:
+            try:
+                future.result(timeout=timeout)
+            except Exception as e:
+                print(f"[Memory] Warning: Representation generation timeout for chunk {chunk_id}: {e}")
 
-    def _build_dynamic_context(self, system_prompt: str, user_question: str) -> List[Dict]:
+    def _build_dynamic_context(self, system_prompt: str, user_question: str, round_num: int = 0) -> List[Dict]:
         """
         Build dynamic context using attention-based focusing.
         
         Args:
             system_prompt: The system prompt
             user_question: The original user question
+            round_num: Current round number (for logging)
         
         Returns:
             List of messages for the LLM
@@ -395,6 +554,24 @@ class MultiTurnReactAgent(FnCallAgent):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_question}
             ]
+        
+        # Wait for any pending representations for OLD chunks only
+        # (Recent chunks use "full" anyway, so we don't need to wait for them)
+        # Only wait for chunks that are NOT in the recent window
+        recent_chunks = self.memory_store.get_recent_chunks(NUM_RECENT_FULL)
+        recent_ids = set(c.id for c in recent_chunks)
+        
+        with self._rep_lock:
+            old_pending = {cid: fut for cid, fut in self._pending_rep_futures.items() 
+                         if cid not in recent_ids}
+        
+        if old_pending:
+            print(f"[Memory] Waiting for {len(old_pending)} old chunk representations...")
+            for chunk_id, future in old_pending.items():
+                try:
+                    future.result(timeout=10.0)  # Wait up to 10s per old chunk
+                except Exception as e:
+                    print(f"[Memory] Warning: Rep generation timeout for chunk {chunk_id}")
         
         # Compute attention weights
         if self.attention_scorer is not None:
@@ -427,6 +604,9 @@ class MultiTurnReactAgent(FnCallAgent):
             # Log context stats
             total_tokens = self.count_tokens(messages)
             print(f"[Context] Built dynamic context: {len(messages)} messages, ~{total_tokens} tokens")
+            
+            # Log dynamic context to file for debugging repeated tool_call issues
+            self._log_dynamic_context(round_num, messages, chunk_levels)
             
             return messages
         except Exception as e:
@@ -498,10 +678,13 @@ class MultiTurnReactAgent(FnCallAgent):
             # Build context for LLM
             if ENABLE_DYNAMIC_CONTEXT and self.memory_store.size() > NUM_RECENT_FULL:
                 # Use dynamic context focusing
-                messages = self._build_dynamic_context(system_prompt, question)
+                messages = self._build_dynamic_context(system_prompt, question, round_num)
             else:
                 # Use full messages for early rounds or when dynamic context is disabled
                 messages = full_messages
+                # Still log the context even when using full messages
+                if ENABLE_DYNAMIC_CONTEXT:
+                    self._log_dynamic_context(round_num, messages, {})
             
             content = self.call_server(messages, planning_port)
             print(f'Round {round_num}: {content}')
@@ -577,7 +760,7 @@ class MultiTurnReactAgent(FnCallAgent):
                 
                 # Build final context and request answer
                 if ENABLE_DYNAMIC_CONTEXT:
-                    final_messages = self._build_dynamic_context(system_prompt, question)
+                    final_messages = self._build_dynamic_context(system_prompt, question, round_num)
                 else:
                     final_messages = full_messages
                 
