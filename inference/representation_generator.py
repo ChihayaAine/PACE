@@ -225,6 +225,7 @@ Output ONLY the JSON, no other text."""
             # ================================================================
             # Alibaba IAI Gemini API call
             # ================================================================
+            print(f"[RepresentationGenerator] Summarizing with Alibaba IAI Gemini ({self.model_name})...")
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
