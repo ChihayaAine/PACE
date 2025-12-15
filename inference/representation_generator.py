@@ -117,7 +117,13 @@ Output ONLY the JSON, no other text."""
         )
         self.model_name = "google/gemini-2.5-pro"
         
-        print(f"[RepresentationGenerator] Initialized: model={self.model_name}, empid={empid}, endpoint={google_endpoint}")
+        print(f"[RepresentationGenerator] ========================================")
+        print(f"[RepresentationGenerator] Using Alibaba IAI (NOT OpenRouter)")
+        print(f"[RepresentationGenerator] Model: {self.model_name}")
+        print(f"[RepresentationGenerator] EmpID: {empid}")
+        print(f"[RepresentationGenerator] Endpoint: {google_endpoint}")
+        print(f"[RepresentationGenerator] API Key: {api_key}")
+        print(f"[RepresentationGenerator] ========================================")
         
         # ========================================================================
         # OpenRouter Client (Backup - commented out)
