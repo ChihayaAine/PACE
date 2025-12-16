@@ -253,12 +253,17 @@ class MultiTurnReactAgent(FnCallAgent):
     def _finalize_memory_log(self, termination: str = ""):
         """
         Mark the log file as complete when task finishes.
+        Wait for any pending representation generations first.
         
         Args:
             termination: The termination reason
         """
         if not ENABLE_DYNAMIC_CONTEXT or self.current_log_filepath is None:
             return
+        
+        # First, wait for any pending representation generations to complete
+        # This ensures all chunks are written to log with complete representations
+        self._wait_for_all_pending_representations()
         
         try:
             with open(self.current_log_filepath, 'r', encoding='utf-8') as f:
@@ -275,6 +280,33 @@ class MultiTurnReactAgent(FnCallAgent):
             print(f"[Memory] Finalized log file: {self.current_log_filepath}")
         except Exception as e:
             print(f"[Memory] Error finalizing log: {e}")
+    
+    def _wait_for_all_pending_representations(self, timeout: float = 60.0):
+        """
+        Wait for all pending representation generations to complete.
+        Called before finalizing memory log.
+        
+        Args:
+            timeout: Max seconds to wait total
+        """
+        with self._rep_lock:
+            pending = list(self._pending_rep_futures.items())
+        
+        if not pending:
+            return
+        
+        print(f"[Memory] Waiting for {len(pending)} pending representation generations before finalizing...")
+        import time
+        start = time.time()
+        for chunk_id, future in pending:
+            remaining = timeout - (time.time() - start)
+            if remaining <= 0:
+                print(f"[Memory] Timeout waiting for representations, some may be incomplete")
+                break
+            try:
+                future.result(timeout=min(remaining, 15.0))
+            except Exception as e:
+                print(f"[Memory] Warning: Representation generation timeout for chunk {chunk_id}")
         
         # Also finalize context log
         if self.current_context_log_filepath:
@@ -470,6 +502,7 @@ class MultiTurnReactAgent(FnCallAgent):
         
         # Step 3: Submit async task to generate proper representations (NON-BLOCKING)
         # Since recent chunks use "full" anyway, this doesn't block next step
+        # Log file will be written AFTER Gemini generation completes (in _generate_representations_async)
         user_goal = getattr(self, 'user_prompt', '') or ''
         future = self._rep_executor.submit(
             self._generate_representations_async,
@@ -479,17 +512,19 @@ class MultiTurnReactAgent(FnCallAgent):
         with self._rep_lock:
             self._pending_rep_futures[chunk.id] = future
         
-        # Real-time: Append chunk to log file immediately
-        self._append_chunk_to_log(chunk)
+        # NOTE: Don't write to log here - wait for Gemini to finish first
+        # The log will be written in _generate_representations_async after completion
         
         return chunk
     
     def _generate_representations_async(self, chunk_id: int, content: str, chunk_type: str, user_goal: str):
         """
         Generate representations in background thread and update chunk when ready.
+        After generation completes, write the chunk to log file.
         
         This is called async by ThreadPoolExecutor.
         """
+        chunk = None
         try:
             print(f"[Memory] Async generating representations for chunk {chunk_id}...")
             representations = self.rep_generator.generate_representations(content, chunk_type, user_goal=user_goal)
@@ -501,7 +536,10 @@ class MultiTurnReactAgent(FnCallAgent):
                     chunk.representations["summary_detailed"] = representations["summary_detailed"]
                     chunk.representations["summary_brief"] = representations["summary_brief"]
                     chunk.representations["keywords"] = representations["keywords"]
-                    print(f"[Memory] Updated chunk {chunk_id} with generated representations, keywords: {representations['keywords'][:5]}")
+                    print(f"[Memory] ✓ Updated chunk {chunk_id} with LLM representations, keywords: {representations['keywords'][:5]}")
+                    
+                    # NOW write the complete chunk to log file
+                    self._append_chunk_to_log(chunk)
             
             # Remove from pending
             with self._rep_lock:
@@ -509,8 +547,14 @@ class MultiTurnReactAgent(FnCallAgent):
                     del self._pending_rep_futures[chunk_id]
                     
         except Exception as e:
-            print(f"[Memory] Async rep generation failed for chunk {chunk_id}: {e}")
-            # Keep fallback representations
+            print(f"[Memory] ❌ Async rep generation failed for chunk {chunk_id}: {e}")
+            # Still write chunk to log with fallback representations
+            if self.memory_store is not None:
+                chunk = self.memory_store.get_chunk(chunk_id)
+                if chunk is not None:
+                    print(f"[Memory] Writing chunk {chunk_id} with fallback representations")
+                    self._append_chunk_to_log(chunk)
+            
             with self._rep_lock:
                 if chunk_id in self._pending_rep_futures:
                     del self._pending_rep_futures[chunk_id]
