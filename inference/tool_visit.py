@@ -19,6 +19,42 @@ RLAB_API_HEADERS = {
     'rlab-request-source': 'deep-research',
 }
 
+# ============ Alibaba IAI Gemini API 配置 (same as accio-agent-task) ============
+def _init_gemini_client():
+    """Initialize Alibaba IAI Gemini client for webpage summarization."""
+    PROJECT_ENV = os.getenv('PROJECT_ENV', 'local')
+    
+    if PROJECT_ENV == 'local':
+        empid = os.getenv('EMPID')
+        if not empid:
+            print("[Visit] WARNING: EMPID not set, falling back to OpenRouter")
+            return None, None
+    else:
+        empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
+    
+    # Use /google endpoint for Gemini models
+    google_endpoint = (
+        'http://iai.vipserver:7001/google'
+        if PROJECT_ENV == 'online'
+        else 'https://iai.alibaba-inc.com/google'
+    )
+    api_key = "accio-agent" if PROJECT_ENV in ["online", "pre"] else "icbu-buyer-agent-algo"
+    
+    client = OpenAI(
+        default_headers={'empId': empid, 'iai-tag': 'accio'},
+        api_key=api_key,
+        base_url=google_endpoint,
+        timeout=120.0,
+        max_retries=3
+    )
+    model_name = "google/gemini-2.5-pro"
+    
+    print(f"[Visit] Using Alibaba IAI Gemini: {model_name} (empId: {empid})")
+    return client, model_name
+
+# Initialize Gemini client at module load
+_GEMINI_CLIENT, _GEMINI_MODEL = _init_gemini_client()
+
 VISIT_SERVER_TIMEOUT = int(os.getenv("VISIT_SERVER_TIMEOUT", 200))
 WEBCONTENT_MAXLENGTH = int(os.getenv("WEBCONTENT_MAXLENGTH", 150000))
 
@@ -97,10 +133,60 @@ class Visit(BaseTool):
         return response.strip()
 
     def call_server(self, msgs, max_retries=2):
-        """调用 LLM 服务进行内容摘要"""
+        """调用 LLM 服务进行内容摘要 - 使用 Alibaba IAI Gemini API"""
+        
+        # ================================================================
+        # Alibaba IAI Gemini API (Primary)
+        # ================================================================
+        if _GEMINI_CLIENT is not None:
+            print(f"[Visit] Summarizing with Alibaba IAI Gemini ({_GEMINI_MODEL})...")
+            for attempt in range(max_retries):
+                try:
+                    chat_response = _GEMINI_CLIENT.chat.completions.create(
+                        model=_GEMINI_MODEL,
+                        messages=msgs,
+                        temperature=0.7,
+                        max_tokens=3000
+                    )
+                    
+                    # Handle API error response (Alibaba IAI specific)
+                    if hasattr(chat_response, 'success') and chat_response.success == False:
+                        print(f"[Visit] Gemini API Error: {getattr(chat_response, 'message', 'Unknown')}")
+                        continue
+                    
+                    if not chat_response or not chat_response.choices:
+                        print(f"[Visit] Empty response from Gemini API")
+                        continue
+                    
+                    content = chat_response.choices[0].message.content
+                    if content:
+                        try:
+                            json.loads(content)
+                        except:
+                            # extract json from string 
+                            left = content.find('{')
+                            right = content.rfind('}') 
+                            if left != -1 and right != -1 and left <= right: 
+                                content = content[left:right+1]
+                        return content
+                except Exception as e:
+                    print(f"[Visit] Gemini API attempt {attempt + 1} failed: {e}")
+                    if attempt == (max_retries - 1):
+                        break
+                    continue
+        
+        # ================================================================
+        # OpenRouter Fallback (if Alibaba IAI not available)
+        # ================================================================
+        print("[Visit] Falling back to OpenRouter...")
         api_key = os.environ.get("API_KEY")
         url_llm = os.environ.get("API_BASE")
         model_name = os.environ.get("SUMMARY_MODEL_NAME", "")
+        
+        if not api_key or not url_llm:
+            print("[Visit] WARNING: No API credentials available")
+            return ""
+        
         client = OpenAI(
             api_key=api_key,
             base_url=url_llm,
@@ -127,6 +213,8 @@ class Visit(BaseTool):
                 if attempt == (max_retries - 1):
                     return ""
                 continue
+        
+        return ""
 
     def youcom_readpage(self, url: str) -> str:
         """

@@ -697,6 +697,19 @@ class MultiTurnReactAgent(FnCallAgent):
             full_messages.append({"role": "assistant", "content": content.strip()})
             
             if '<tool_call>' in content and '</tool_call>' in content:
+                # Detect repetition loop: count how many <tool_call> tags
+                tool_call_count = content.count('<tool_call>')
+                if tool_call_count > 1:
+                    print(f"[Agent] WARNING: Detected {tool_call_count} repeated <tool_call> tags - model repetition loop!")
+                    # Truncate content to keep only the FIRST tool_call
+                    first_end = content.find('</tool_call>') + len('</tool_call>')
+                    # Keep thinking part (before first tool_call) + first tool_call only
+                    first_start = content.find('<tool_call>')
+                    content = content[:first_end]
+                    print(f"[Agent] Truncated content to first tool_call only")
+                    # Update the message we just added
+                    full_messages[-1]["content"] = content.strip()
+                
                 tool_call = content.split('<tool_call>')[1].split('</tool_call>')[0]
                 tool_name = "unknown"
                 try:
