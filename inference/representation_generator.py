@@ -190,11 +190,17 @@ Output ONLY the JSON, no other text."""
                 llm_result = self._generate_all_with_llm(content, user_goal)
                 if llm_result:
                     result.update(llm_result)
+                    print(f"[RepresentationGenerator] ✓ LLM summarization successful")
                     return result
+                else:
+                    print(f"[RepresentationGenerator] ⚠ LLM returned None, using fallback")
             except Exception as e:
-                print(f"[RepresentationGenerator] LLM summarization failed: {e}")
+                print(f"[RepresentationGenerator] ❌ LLM summarization exception: {e}")
+        else:
+            print(f"[RepresentationGenerator] ⚠ No client available, using fallback")
         
         # Fallback: rule-based summarization
+        print(f"[RepresentationGenerator] Using FALLBACK (simple truncation)...")
         result["summary_detailed"] = self._generate_detailed_fallback(content)
         result["summary_brief"] = self._generate_brief_fallback(content)
         result["keywords"] = self._extract_keywords_simple(content)
@@ -226,6 +232,8 @@ Output ONLY the JSON, no other text."""
             # Alibaba IAI Gemini API call
             # ================================================================
             print(f"[RepresentationGenerator] Summarizing with Alibaba IAI Gemini ({self.model_name})...")
+            print(f"[RepresentationGenerator] Content length: {len(content)} chars, Goal: {goal[:100]}...")
+            
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -233,23 +241,28 @@ Output ONLY the JSON, no other text."""
                 max_tokens=3000
             )
             
+            # Debug: print full response structure
+            print(f"[RepresentationGenerator] Response type: {type(response)}")
+            
             # Handle API error response (Alibaba IAI specific)
             if hasattr(response, 'success') and response.success == False:
-                print(f"[RepresentationGenerator] API Error: code={getattr(response, 'code', 'N/A')}, message={getattr(response, 'message', 'N/A')}")
+                print(f"[RepresentationGenerator] ❌ API Error: code={getattr(response, 'code', 'N/A')}, message={getattr(response, 'message', 'N/A')}")
                 return None
             
             # Handle None or empty response
             if not response or not response.choices:
-                print(f"[RepresentationGenerator] Empty response from API: {response}")
+                print(f"[RepresentationGenerator] ❌ Empty response from API")
+                print(f"[RepresentationGenerator] Full response: {response}")
                 return None
             
             choice = response.choices[0]
             if not choice.message or choice.message.content is None:
                 # Some models return content in different fields
-                print(f"[RepresentationGenerator] No content in response. Choice: {choice}")
+                print(f"[RepresentationGenerator] ❌ No content in response. Choice: {choice}")
                 return None
             
             response_text = choice.message.content.strip()
+            print(f"[RepresentationGenerator] ✓ Got response: {len(response_text)} chars")
             
             # ================================================================
             # OpenRouter API call (commented out - backup)
@@ -266,13 +279,20 @@ Output ONLY the JSON, no other text."""
             json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)
             if json_match:
                 response_text = json_match.group(1)
+                print(f"[RepresentationGenerator] Extracted JSON from code block")
             
             # Find JSON object
             start = response_text.find('{')
             end = response_text.rfind('}') + 1
             if start != -1 and end > start:
                 json_str = response_text[start:end]
-                parsed = json.loads(json_str)
+                try:
+                    parsed = json.loads(json_str)
+                    print(f"[RepresentationGenerator] ✓ Parsed JSON successfully, keys: {list(parsed.keys())}")
+                except json.JSONDecodeError as je:
+                    print(f"[RepresentationGenerator] ❌ JSON parse error: {je}")
+                    print(f"[RepresentationGenerator] JSON string (first 500 chars): {json_str[:500]}")
+                    return None
                 
                 # Build summary_detailed from rational + evidence + summary
                 detailed_parts = []
@@ -285,14 +305,20 @@ Output ONLY the JSON, no other text."""
                 
                 summary_detailed = "\n\n".join(detailed_parts) if detailed_parts else parsed.get("evidence", "")
                 
-                return {
+                result = {
                     "summary_detailed": summary_detailed,
                     "summary_brief": parsed.get("summary_brief", ""),
                     "keywords": parsed.get("keywords", [])
                 }
+                print(f"[RepresentationGenerator] ✓ Generated representations: detailed={len(summary_detailed)} chars, brief={len(result['summary_brief'])} chars, keywords={len(result['keywords'])}")
+                return result
+            else:
+                print(f"[RepresentationGenerator] ❌ No JSON object found in response")
+                print(f"[RepresentationGenerator] Response text (first 500 chars): {response_text[:500]}")
+                return None
                 
         except Exception as e:
-            print(f"[RepresentationGenerator] Error in LLM extraction: {e}")
+            print(f"[RepresentationGenerator] ❌ Error in LLM extraction: {e}")
             import traceback
             traceback.print_exc()
         
