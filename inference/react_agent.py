@@ -637,12 +637,14 @@ class MultiTurnReactAgent(FnCallAgent):
             attention_weights = {c.id: 1.0 for c in self.memory_store.get_all_chunks()}
         
         # Build context using attention weights
+        # Pass round_num for adaptive compression (higher rounds → more compression)
         try:
             messages, chunk_levels = self.context_builder.build_context_simple(
                 memory_store=self.memory_store,
                 attention_weights=attention_weights,
                 system_prompt=system_prompt,
-                user_question=user_question
+                user_question=user_question,
+                round_num=round_num
             )
             
             # Log context stats

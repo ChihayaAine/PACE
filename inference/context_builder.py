@@ -23,19 +23,35 @@ class ContextBuilder:
     Selects representation levels (full/detailed/brief/placeholder) for each
     historical chunk based on its attention weight, ensuring the final context
     stays within the token budget.
+    
+    NEW: Adaptive Compression - thresholds are dynamically adjusted based on:
+    - Round progress (higher rounds → more compression)
+    - Token usage (higher usage → more compression)
     """
     
-    # Default thresholds for representation level selection
+    # Base thresholds for representation level selection (at low pressure)
     # These are applied AFTER softmax normalization
-    # Since softmax outputs sum to 1, with many chunks each weight will be small
     # We use relative thresholds based on uniform distribution (1/N)
-    # With temperature=0.3, distribution is sharper, so thresholds are lower
-    DEFAULT_THRESHOLDS = {
-        "a": 0.4,   # Below 0.4x uniform: placeholder (bottom ~20%)
-        "b": 0.8,   # 0.4-0.8x uniform: summary_brief (low relevance)
-        "c": 1.5,   # 0.8-1.5x uniform: summary_detailed (medium relevance)
-        # w > 1.5x uniform: full (high relevance, top ~15-20%)
+    BASE_THRESHOLDS = {
+        "a": 0.4,   # Below 0.4x uniform: placeholder
+        "b": 0.8,   # 0.4-0.8x uniform: summary_brief
+        "c": 1.5,   # 0.8-1.5x uniform: summary_detailed
+        # w > 1.5x uniform: full
     }
+    
+    # High pressure thresholds (at maximum pressure)
+    # Much stricter - only very relevant chunks get detailed/full
+    HIGH_PRESSURE_THRESHOLDS = {
+        "a": 0.8,   # Below 0.8x uniform: placeholder (more keywords)
+        "b": 1.2,   # 0.8-1.2x uniform: summary_brief (more brief)
+        "c": 2.5,   # 1.2-2.5x uniform: summary_detailed
+        # w > 2.5x uniform: full (only the most relevant)
+    }
+    
+    # Pressure calculation parameters
+    MAX_ROUNDS_DEFAULT = 100
+    MAX_TOKENS_DEFAULT = 110 * 1024  # 110K
+    PRESSURE_ONSET_RATIO = 0.5  # Start increasing pressure at 50% capacity
     
     def __init__(self,
                  max_context_tokens: int = 100000,
@@ -51,13 +67,83 @@ class ContextBuilder:
         """
         self.max_context_tokens = max_context_tokens
         self.num_recent_full = num_recent_full
-        self.thresholds = thresholds or self.DEFAULT_THRESHOLDS
+        self.base_thresholds = thresholds or self.BASE_THRESHOLDS
+        
+        # For backward compatibility
+        self.thresholds = self.base_thresholds
+        
+        # Adaptive compression state
+        self.current_pressure = 0.0
+        self.max_rounds = int(os.getenv('MAX_LLM_CALL_PER_RUN', self.MAX_ROUNDS_DEFAULT))
         
         # Token encoder
         try:
             self.encoding = tiktoken.get_encoding("cl100k_base")
         except:
             self.encoding = None
+    
+    def _calculate_pressure(self, round_num: int, current_tokens: int) -> float:
+        """
+        Calculate compression pressure based on round progress and token usage.
+        
+        Pressure is a value between 0 and 1:
+        - 0: Early stage, no pressure, use base thresholds
+        - 1: Maximum pressure, use strict thresholds
+        
+        Args:
+            round_num: Current round number (1-indexed)
+            current_tokens: Current token count in context
+        
+        Returns:
+            Pressure value between 0 and 1
+        """
+        # Round pressure: starts increasing after PRESSURE_ONSET_RATIO of max rounds
+        round_onset = self.max_rounds * self.PRESSURE_ONSET_RATIO
+        if round_num <= round_onset:
+            round_pressure = 0.0
+        else:
+            # Linear increase from 0 to 1 between onset and max
+            round_pressure = (round_num - round_onset) / (self.max_rounds - round_onset)
+            round_pressure = min(1.0, round_pressure)
+        
+        # Token pressure: starts increasing after PRESSURE_ONSET_RATIO of max tokens
+        token_onset = self.MAX_TOKENS_DEFAULT * self.PRESSURE_ONSET_RATIO
+        if current_tokens <= token_onset:
+            token_pressure = 0.0
+        else:
+            # Linear increase from 0 to 1 between onset and max
+            token_pressure = (current_tokens - token_onset) / (self.MAX_TOKENS_DEFAULT - token_onset)
+            token_pressure = min(1.0, token_pressure)
+        
+        # Use the maximum of both pressures
+        pressure = max(round_pressure, token_pressure)
+        
+        return pressure
+    
+    def _get_adaptive_thresholds(self, round_num: int, current_tokens: int) -> Dict[str, float]:
+        """
+        Get dynamically adjusted thresholds based on current pressure.
+        
+        Uses linear interpolation between base thresholds and high-pressure thresholds.
+        
+        Args:
+            round_num: Current round number
+            current_tokens: Current token count
+        
+        Returns:
+            Dictionary with adjusted thresholds 'a', 'b', 'c'
+        """
+        pressure = self._calculate_pressure(round_num, current_tokens)
+        self.current_pressure = pressure  # Store for logging
+        
+        # Linear interpolation: base + pressure * (high - base)
+        adaptive_thresholds = {}
+        for key in ['a', 'b', 'c']:
+            base_val = self.base_thresholds.get(key, self.BASE_THRESHOLDS[key])
+            high_val = self.HIGH_PRESSURE_THRESHOLDS[key]
+            adaptive_thresholds[key] = base_val + pressure * (high_val - base_val)
+        
+        return adaptive_thresholds
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text."""
@@ -67,16 +153,23 @@ class ContextBuilder:
     
     def select_representation_level(self, 
                                       attention_weight: float,
-                                      num_history_chunks: int) -> str:
+                                      num_history_chunks: int,
+                                      round_num: int = 1,
+                                      current_tokens: int = 0) -> str:
         """
         Select representation level based on attention weight.
         
         The weight is compared against thresholds that are relative to
         the uniform distribution (1/N where N is number of history chunks).
         
+        NEW: Thresholds are adaptively adjusted based on round progress
+        and token usage (pressure-based compression).
+        
         Args:
             attention_weight: The softmax-normalized attention weight
             num_history_chunks: Total number of history chunks being scored
+            round_num: Current round number (for adaptive thresholds)
+            current_tokens: Current token count (for adaptive thresholds)
         
         Returns:
             Representation level: 'full', 'summary_detailed', 'summary_brief', 'placeholder', or 'omit'
@@ -90,9 +183,12 @@ class ContextBuilder:
         # Relative weight compared to uniform
         relative_weight = attention_weight / (uniform_weight + 1e-8)
         
-        a = self.thresholds.get("a", 0.5)
-        b = self.thresholds.get("b", 1.0)
-        c = self.thresholds.get("c", 2.0)
+        # Get adaptive thresholds based on current pressure
+        thresholds = self._get_adaptive_thresholds(round_num, current_tokens)
+        
+        a = thresholds.get("a", 0.5)
+        b = thresholds.get("b", 1.0)
+        c = thresholds.get("c", 2.0)
         
         if relative_weight > c:
             return 'full'
@@ -295,10 +391,20 @@ class ContextBuilder:
                               memory_store: ExternalMemoryStore,
                               attention_weights: Dict[int, float],
                               system_prompt: str = "",
-                              user_question: str = "") -> Tuple[List[Dict], Dict[int, str]]:
+                              user_question: str = "",
+                              round_num: int = 1) -> Tuple[List[Dict], Dict[int, str]]:
         """
         Simplified context building that returns messages compatible with
         the existing react_agent format.
+        
+        NEW: Supports adaptive compression based on round progress and token usage.
+        
+        Args:
+            memory_store: External memory store with historical chunks
+            attention_weights: Dictionary mapping chunk_id to attention weight
+            system_prompt: System prompt to include
+            user_question: Original user question
+            round_num: Current round number (for adaptive compression)
         
         Returns:
             Tuple of:
@@ -334,7 +440,12 @@ class ContextBuilder:
             
             for chunk in sorted(history_chunks, key=lambda c: c.id):
                 weight = attention_weights.get(chunk.id, 0.0)
-                level = self.select_representation_level(weight, num_history)
+                # Use adaptive thresholds based on round and token usage
+                level = self.select_representation_level(
+                    weight, num_history, 
+                    round_num=round_num, 
+                    current_tokens=current_tokens + used_tokens
+                )
                 original_level = level  # Track original selection
                 
                 content = chunk.get_representation(level)
@@ -382,8 +493,8 @@ class ContextBuilder:
             else:
                 messages.append({"role": "user", "content": content})
         
-        # Print detailed log for debugging (now with raw similarities)
-        self._log_context_build(chunk_levels, attention_weights, num_history, memory_store)
+        # Print detailed log for debugging (now with raw similarities and adaptive thresholds)
+        self._log_context_build(chunk_levels, attention_weights, num_history, memory_store, round_num)
         
         return messages, chunk_levels
     
@@ -391,7 +502,8 @@ class ContextBuilder:
                            chunk_levels: Dict[int, str], 
                            attention_weights: Dict[int, float],
                            num_history: int,
-                           memory_store: ExternalMemoryStore = None):
+                           memory_store: ExternalMemoryStore = None,
+                           round_num: int = 0):
         """
         Log detailed information about context building for debugging.
         
@@ -400,9 +512,18 @@ class ContextBuilder:
             attention_weights: Dictionary mapping chunk_id to attention weight
             num_history: Number of history chunks
             memory_store: Optional memory store to retrieve raw similarities
+            round_num: Current round number
         """
         print("\n" + "=" * 80)
         print("[Context Build Log] Representation levels used for each chunk:")
+        
+        # Show adaptive compression info
+        pressure = self.current_pressure
+        pressure_pct = int(pressure * 100)
+        thresholds = self._get_adaptive_thresholds(round_num, 0)  # Get current thresholds
+        print(f"[Adaptive Compression] Round: {round_num}, Pressure: {pressure_pct}%")
+        print(f"[Adaptive Thresholds] a={thresholds['a']:.2f}, b={thresholds['b']:.2f}, c={thresholds['c']:.2f}")
+        
         print("-" * 80)
         print(f"{'ID':<6} {'Type':<20} {'Raw Sim':<10} {'Weight':<12} {'Rel':<8} {'Level':<15}")
         print("-" * 80)
