@@ -6,12 +6,12 @@ from qwen_agent.tools.base import BaseTool, register_tool
 import os
 
 
-# ============ 阿里 Google Search API 配置 ============
-RLAB_GOOGLE_SEARCH_API = "ICBU_P0715_2610228AC"
-RLAB_API_URL = "https://rlab.alibaba-inc.com/service/v1/open/"
+# ============ Google Search API 配置 ============
+RLAB_GOOGLE_SEARCH_API = os.getenv("RLAB_GOOGLE_SEARCH_API", "")
+RLAB_API_URL = os.getenv("RLAB_API_URL", "")
 RLAB_API_HEADERS = {
     'Content-Type': 'application/json',
-    'rlab-api-key': 'ICBU_N4552_0E2D56C3-033D-4089-8338-7FD842FC8E5605F',
+    'rlab-api-key': os.getenv("RLAB_API_KEY", ""),
 }
 
 
@@ -42,7 +42,7 @@ class Search(BaseTool):
 
     def google_search_with_rlab(self, query: str) -> str:
         """
-        使用阿里 RLAB Google Search API 进行搜索
+        使用 RLAB Google Search API 进行搜索
         
         Args:
             query: 搜索查询字符串

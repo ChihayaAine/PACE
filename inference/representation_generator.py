@@ -85,57 +85,25 @@ Output ONLY the JSON, no other text."""
             self.encoding = None
         
         # ========================================================================
-        # Alibaba IAI Gemini Client (same as accio-agent-task)
+        # Summary LLM Client
         # ========================================================================
-        PROJECT_ENV = os.getenv('PROJECT_ENV', 'local')
+        self.api_key = api_key or os.environ.get("SUMMARY_API_KEY", "") or os.environ.get("API_KEY", "")
+        self.api_base = api_base or os.environ.get("SUMMARY_API_BASE", "") or os.environ.get("API_BASE", "")
+        self.model_name = model_name or os.environ.get("SUMMARY_MODEL_NAME", "google/gemini-2.5-pro")
         
-        if PROJECT_ENV == 'local':
-            empid = os.getenv('EMPID')
-            if not empid:
-                raise ValueError(
-                    "EMPID environment variable is required for local environment. "
-                    "Please set EMPID environment variable with your employee ID. "
-                    "Example: export EMPID=your-employee-id"
-                )
-        else:
-            empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
-        
-        # Use /google endpoint for Gemini models
-        google_endpoint = (
-            'http://iai.vipserver:7001/google'
-            if PROJECT_ENV == 'online'
-            else 'https://iai.alibaba-inc.com/google'
-        )
-        api_key = "accio-agent" if PROJECT_ENV in ["online", "pre"] else "icbu-buyer-agent-algo"
-        
-        self.client = OpenAI(
-            default_headers={'empId': empid, 'iai-tag': 'accio'},
-            api_key=api_key,
-            base_url=google_endpoint,
-            timeout=120.0,
-            max_retries=3
-        )
-        self.model_name = "google/gemini-2.5-pro"
-        
-        print(f"[RepresentationGenerator] ========================================")
-        print(f"[RepresentationGenerator] Using Alibaba IAI (NOT OpenRouter)")
-        print(f"[RepresentationGenerator] Model: {self.model_name}")
-        print(f"[RepresentationGenerator] EmpID: {empid}")
-        print(f"[RepresentationGenerator] Endpoint: {google_endpoint}")
-        print(f"[RepresentationGenerator] API Key: {api_key}")
-        print(f"[RepresentationGenerator] ========================================")
-        
-        # ========================================================================
-        # OpenRouter Client (Backup - commented out)
-        # ========================================================================
-        # self.api_key = api_key or os.environ.get("API_KEY", "")
-        # self.api_base = api_base or os.environ.get("API_BASE", "")
-        # self.model_name = model_name or os.environ.get("SUMMARY_MODEL_NAME", "")
-        # 
-        # # Initialize OpenAI client if credentials available
-        # self.client = None
-        # if self.api_key and self.api_base:
-        #     self.client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+        # Initialize OpenAI client if credentials available
+        self.client = None
+        if self.api_key and self.api_base:
+            self.client = OpenAI(
+                api_key=self.api_key, 
+                base_url=self.api_base,
+                timeout=120.0,
+                max_retries=3
+            )
+            print(f"[RepresentationGenerator] ========================================")
+            print(f"[RepresentationGenerator] Model: {self.model_name}")
+            print(f"[RepresentationGenerator] Endpoint: {self.api_base}")
+            print(f"[RepresentationGenerator] ========================================")
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text."""
@@ -184,7 +152,6 @@ Output ONLY the JSON, no other text."""
             return result
         
         # Try to use LLM for summarization (single call for all levels)
-        # Now using Alibaba IAI Gemini API
         if self.client:
             try:
                 llm_result = self._generate_all_with_llm(content, user_goal)
@@ -211,8 +178,6 @@ Output ONLY the JSON, no other text."""
         """
         Generate all representation levels in a single LLM call.
         
-        Uses Alibaba IAI Gemini API (gemini-2.5-pro).
-        
         Returns:
             Dict with summary_detailed, summary_brief, and keywords
         """
@@ -228,10 +193,7 @@ Output ONLY the JSON, no other text."""
         )
         
         try:
-            # ================================================================
-            # Alibaba IAI Gemini API call
-            # ================================================================
-            print(f"[RepresentationGenerator] Summarizing with Alibaba IAI Gemini ({self.model_name})...")
+            print(f"[RepresentationGenerator] Summarizing with {self.model_name}...")
             print(f"[RepresentationGenerator] Content length: {len(content)} chars, Goal: {goal[:100]}...")
             
             response = self.client.chat.completions.create(
@@ -241,14 +203,6 @@ Output ONLY the JSON, no other text."""
                 max_tokens=3000
             )
             
-            # Debug: print full response structure
-            print(f"[RepresentationGenerator] Response type: {type(response)}")
-            
-            # Handle API error response (Alibaba IAI specific)
-            if hasattr(response, 'success') and response.success == False:
-                print(f"[RepresentationGenerator] ❌ API Error: code={getattr(response, 'code', 'N/A')}, message={getattr(response, 'message', 'N/A')}")
-                return None
-            
             # Handle None or empty response
             if not response or not response.choices:
                 print(f"[RepresentationGenerator] ❌ Empty response from API")
@@ -257,23 +211,11 @@ Output ONLY the JSON, no other text."""
             
             choice = response.choices[0]
             if not choice.message or choice.message.content is None:
-                # Some models return content in different fields
-                print(f"[RepresentationGenerator] ❌ No content in response. Choice: {choice}")
+                print(f"[RepresentationGenerator] ❌ No content in response")
                 return None
             
             response_text = choice.message.content.strip()
             print(f"[RepresentationGenerator] ✓ Got response: {len(response_text)} chars")
-            
-            # ================================================================
-            # OpenRouter API call (commented out - backup)
-            # ================================================================
-            # response = self.client.chat.completions.create(
-            #     model=self.model_name,
-            #     messages=[{"role": "user", "content": prompt}],
-            #     temperature=0.3,
-            #     max_tokens=3000
-            # )
-            # response_text = response.choices[0].message.content.strip()
             
             # Parse JSON response
             json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)

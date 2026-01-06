@@ -41,9 +41,9 @@ class AttentionScorer:
     """
     
     # ========================================================================
-    # OpenRouter API configuration (commented out, kept for reference)
+    # API configuration (commented out, kept for reference)
     # ========================================================================
-    # OPENROUTER_API_KEY = "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"
+    # OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
     # OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
     
     def __init__(self, 
@@ -141,16 +141,16 @@ class AttentionScorer:
             return [self.encode_text(t) for t in texts]
     
     # ========================================================================
-    # OpenRouter API methods (commented out, kept for reference)
+    # API methods (commented out, kept for reference)
     # ========================================================================
     # def encode_text_api(self, text: str, max_retries: int = 3) -> Optional[np.ndarray]:
     #     """
-    #     Encode text into embedding vector using OpenRouter API.
+    #     Encode text into embedding vector using API.
     #     """
     #     from openai import OpenAI
     #     
     #     client = OpenAI(
-    #         api_key=self.OPENROUTER_API_KEY,
+    #         api_key=os.getenv("OPENROUTER_API_KEY", ""),
     #         base_url=self.OPENROUTER_API_BASE,
     #         timeout=60.0
     #     )

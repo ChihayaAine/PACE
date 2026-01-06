@@ -11,45 +11,33 @@ import tiktoken
 
 
 # ============ You.com Scrape API 配置 ============
-RLAB_YOU_COM_SEARCH = "ICBU_P0715_300480BB4"
-RLAB_API_URL = "https://rlab.alibaba-inc.com/service/v1/open/"
+RLAB_YOU_COM_SEARCH = os.getenv("RLAB_YOU_COM_SEARCH", "")
+RLAB_API_URL = os.getenv("RLAB_API_URL", "")
 RLAB_API_HEADERS = {
     'Content-Type': 'application/json',
-    'rlab-api-key': 'ICBU_H1425_95682FCB-8E8D-4F2F-BFDD-86CD0FE87DD4C71',
+    'rlab-api-key': os.getenv("RLAB_API_KEY", ""),
     'rlab-request-source': 'deep-research',
 }
 
-# ============ Alibaba IAI Gemini API 配置 (same as accio-agent-task) ============
+# ============ Summary LLM API 配置 ============
 def _init_gemini_client():
-    """Initialize Alibaba IAI Gemini client for webpage summarization."""
-    PROJECT_ENV = os.getenv('PROJECT_ENV', 'local')
+    """Initialize LLM client for webpage summarization."""
+    api_key = os.getenv('SUMMARY_API_KEY', '')
+    api_base = os.getenv('SUMMARY_API_BASE', '')
+    model_name = os.getenv('SUMMARY_MODEL_NAME', 'google/gemini-2.5-pro')
     
-    if PROJECT_ENV == 'local':
-        empid = os.getenv('EMPID')
-        if not empid:
-            print("[Visit] WARNING: EMPID not set, falling back to OpenRouter")
-            return None, None
-    else:
-        empid = 'buyer-agent-online' if PROJECT_ENV == 'online' else 'buyer-agent-pre'
-    
-    # Use /google endpoint for Gemini models
-    google_endpoint = (
-        'http://iai.vipserver:7001/google'
-        if PROJECT_ENV == 'online'
-        else 'https://iai.alibaba-inc.com/google'
-    )
-    api_key = "accio-agent" if PROJECT_ENV in ["online", "pre"] else "icbu-buyer-agent-algo"
+    if not api_key or not api_base:
+        print("[Visit] WARNING: SUMMARY_API_KEY or SUMMARY_API_BASE not set, falling back to OpenRouter")
+        return None, None
     
     client = OpenAI(
-        default_headers={'empId': empid, 'iai-tag': 'accio'},
         api_key=api_key,
-        base_url=google_endpoint,
+        base_url=api_base,
         timeout=120.0,
         max_retries=3
     )
-    model_name = "google/gemini-2.5-pro"
     
-    print(f"[Visit] Using Alibaba IAI Gemini: {model_name} (empId: {empid})")
+    print(f"[Visit] Using Summary LLM: {model_name}")
     return client, model_name
 
 # Initialize Gemini client at module load
@@ -133,13 +121,13 @@ class Visit(BaseTool):
         return response.strip()
 
     def call_server(self, msgs, max_retries=2):
-        """调用 LLM 服务进行内容摘要 - 使用 Alibaba IAI Gemini API"""
+        """调用 LLM 服务进行内容摘要"""
         
         # ================================================================
-        # Alibaba IAI Gemini API (Primary)
+        # Summary LLM API (Primary)
         # ================================================================
         if _GEMINI_CLIENT is not None:
-            print(f"[Visit] Summarizing with Alibaba IAI Gemini ({_GEMINI_MODEL})...")
+            print(f"[Visit] Summarizing with {_GEMINI_MODEL}...")
             for attempt in range(max_retries):
                 try:
                     chat_response = _GEMINI_CLIENT.chat.completions.create(
@@ -149,9 +137,8 @@ class Visit(BaseTool):
                         max_tokens=3000
                     )
                     
-                    # Handle API error response (Alibaba IAI specific)
                     if hasattr(chat_response, 'success') and chat_response.success == False:
-                        print(f"[Visit] Gemini API Error: {getattr(chat_response, 'message', 'Unknown')}")
+                        print(f"[Visit] API Error: {getattr(chat_response, 'message', 'Unknown')}")
                         continue
                     
                     if not chat_response or not chat_response.choices:
@@ -176,7 +163,7 @@ class Visit(BaseTool):
                     continue
         
         # ================================================================
-        # OpenRouter Fallback (if Alibaba IAI not available)
+        # OpenRouter Fallback
         # ================================================================
         print("[Visit] Falling back to OpenRouter...")
         api_key = os.environ.get("API_KEY")

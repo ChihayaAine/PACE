@@ -375,9 +375,9 @@ class MultiTurnReactAgent(FnCallAgent):
     
     def call_server(self, msgs, planning_port, max_tries=10):
         
-        openai_api_key = "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"
-        openai_api_base = "https://openrouter.ai/api/v1"
-        model_name = "alibaba/tongyi-deepresearch-30b-a3b"
+        openai_api_key = os.getenv("LLM_API_KEY", "")
+        openai_api_base = os.getenv("LLM_API_BASE", "https://openrouter.ai/api/v1")
+        model_name = os.getenv("LLM_MODEL_NAME", "")
 
         client = OpenAI(
             api_key=openai_api_key,
