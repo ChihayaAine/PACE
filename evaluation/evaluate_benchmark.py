@@ -83,14 +83,14 @@ def call_llm_judge(item):
     
     for attempt in range(100):
         try: 
-            if judge_model == "openai/qwen2.5-72b-instruct":
+            if "72b" in judge_model.lower() or "70b" in judge_model.lower():
                 response = litellm.completion(
                     model=judge_model,
                     messages=[{"role": "user", "content": prompt}],
                     num_retries=5
                 )
                 judgement = response.choices[0].message["content"]
-            elif judge_model == "google/gemini-2.0-flash-001":
+            elif judge_model == "gpt-5":
                 client = get_client()
                 response_obj = client.beta.chat.completions.parse(
                     model=judge_model,
@@ -223,7 +223,7 @@ def single_round_statistics(input_file):
     termination_counts = {}
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(os.getenv("Qwen2_5_7B_PATH", ""))
+        tokenizer = AutoTokenizer.from_pretrained(os.getenv("JUDGE_MODEL_PATH", ""))
     except Exception as e: 
         tokenizer = tiktoken.encoding_for_model("gpt-4o")
     
@@ -328,7 +328,7 @@ def single_round_statistics(input_file):
 def calculate_enhanced_statistics(round_results, round_items):
     
     try:
-        tokenizer = AutoTokenizer.from_pretrained(os.getenv("Qwen2_5_7B_PATH", ""))
+        tokenizer = AutoTokenizer.from_pretrained(os.getenv("JUDGE_MODEL_PATH", ""))
     except Exception as e: 
         tokenizer = tiktoken.encoding_for_model("gpt-4o")
     
@@ -460,11 +460,11 @@ def main():
     
     dataset = args.dataset  
     if dataset in ["gaia", "webwalker"]: 
-        judge_model = "openai/qwen2.5-72b-instruct"
+        judge_model = os.getenv("JUDGE_MODEL_NAME", "openai/gpt-4o")
         judge_prompt = JUDGE_PROMPT_GAIA 
     elif dataset in ["xbench-deepsearch"]: 
         judge_prompt = JUDGE_PROMPT_XBENCH
-        judge_model = "google/gemini-2.0-flash-001"
+        judge_model = "gpt-5"
     elif dataset.startswith("browsecomp_zh"):
         judge_model = "gpt-4o-2024-08-06"
         judge_prompt = JUDGE_PROMPT_BROWSECOMP_OFFICIAL 
@@ -472,7 +472,7 @@ def main():
         judge_model = "gpt-4o-2024-08-06"
         judge_prompt = JUDGE_PROMPT_BROWSECOMP_OFFICIAL
     else:
-        judge_model = "openai/qwen2.5-72b-instruct"
+        judge_model = os.getenv("JUDGE_MODEL_NAME", "openai/gpt-4o")
         judge_prompt = JUDGE_PROMPT_GAIA 
     print(f"Using {dataset} judge prompt ...")
     print(f"Judge prompt:\n {judge_prompt}")

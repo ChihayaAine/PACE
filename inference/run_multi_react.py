@@ -161,7 +161,7 @@ if __name__ == "__main__":
                 'top_p': args.top_p,
                 'presence_penalty': args.presence_penalty
             },
-            'model_type': 'qwen_dashscope'
+            'model_type': 'openai_compatible'
         }
 
         test_agent = MultiTurnReactAgent(

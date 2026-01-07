@@ -85,10 +85,10 @@ class VideoAnalysis(BaseTool):
     def _init_config(self, cfg: Dict) -> Dict:
         """Initialize configuration with sensible defaults"""
         return {
-            'api_key': os.getenv('DASHSCOPE_API_KEY', ''),
-            'api_base': cfg.get('api_base') or os.getenv('DASHSCOPE_API_BASE', ''),
-            'video_model': cfg.get('video_model') or os.getenv('VIDEO_MODEL_NAME', 'qwen-omni-turbo'),
-            'analysis_model': cfg.get('analysis_model') or os.getenv('VIDEO_ANALYSIS_MODEL_NAME', 'qwen-plus-latest'),
+            'api_key': os.getenv('MEDIA_API_KEY', ''),
+            'api_base': cfg.get('api_base') or os.getenv('MEDIA_API_BASE', ''),
+            'video_model': cfg.get('video_model') or os.getenv('VIDEO_MODEL_NAME', ''),
+            'analysis_model': cfg.get('analysis_model') or os.getenv('VIDEO_ANALYSIS_MODEL_NAME', ''),
             'timeout': min(cfg.get('timeout', 30), 300),  # Cap at 300 seconds
             'max_frames': min(cfg.get('max_frames', 20), 50),  # Cap at 50 frames
             'max_file_size': MAX_FILE_SIZE

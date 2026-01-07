@@ -93,7 +93,7 @@ def process_idp_result(result: dict) -> List[dict]:
 def clean_text(text: str) -> str:
     cleaners = [
         lambda x: re.sub(r'\n+', '\n', x),  
-        lambda x: x.replace("Add to Qwen's Reading List", ''),
+        lambda x: x.replace("Add to Reading List", ''),
         lambda x: re.sub(r'-{6,}', '-----', x),  
         lambda x: x.strip()
     ]

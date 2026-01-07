@@ -18,7 +18,7 @@ class IDP():
             access_key_id=key,
             access_key_secret=secret
         )
-        config.endpoint = f'docmind-api.cn-hangzhou.aliyuncs.com'
+        config.endpoint = os.getenv('DOCMIND_API_ENDPOINT', 'docmind-api.cn-hangzhou.aliyuncs.com')
         self.client = docmind_api20220711Client(config)
 
     def file_submit_with_url(self, file_url):
